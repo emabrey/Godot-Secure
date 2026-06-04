@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import random
 import string
 import binascii
@@ -128,6 +129,24 @@ override_backup = True
 not_modify_on_error = True
 track_backup_file = set()
 
+STATE_FILE_NAME = ".godot_secure"
+
+
+def write_state_file(state_path, algorithm, godot_version, token):
+    state = {
+        "algorithm": algorithm,
+        "godot_version": godot_version,
+        "token_hex": token,
+        "applied_at": current_dt,
+    }
+    with open(state_path, "w", encoding="utf-8") as sf:
+        json.dump(state, sf, indent=2)
+
+
+def read_state_file(state_path):
+    with open(state_path, encoding="utf-8") as sf:
+        return json.load(sf)
+
 
 # --- Startup: resolve Godot source root ---
 if len(sys.argv) == 1:
@@ -155,6 +174,105 @@ if not (os.path.isdir(core_dir) and os.path.isfile(sconstruct_file)):
     except EOFError:
         pass
     sys.exit(1)
+
+# --- State file check: refresh-token mode if already applied ---
+state_file_path = os.path.join(godot_root, STATE_FILE_NAME)
+if os.path.isfile(state_file_path):
+    try:
+        state = read_state_file(state_file_path)
+    except Exception as e:
+        print(f"{LogColors.WARNING}Warning: Could not read state file ({e}). Treating as first run.{LogColors.ENDC}")
+        state = None
+
+    if state is not None:
+        prev_algorithm = state.get("algorithm", "AES-256")
+        prev_version   = state.get("godot_version", "unknown")
+        prev_token     = state.get("token_hex", "unknown")
+        prev_applied   = state.get("applied_at", "unknown")
+        use_aes_refresh = prev_algorithm != "Camellia-256"
+
+        refresh_logFileName = f"Log-{current_dt}-Godot-Secure-Refresh-{'AES' if use_aes_refresh else 'Camellia'}.txt"
+        logFileName = refresh_logFileName
+        with open(logFileName, "w", encoding="utf-8") as logf:
+            logf.write(f"Created On - {current_dt}\nGodot-Secure Refresh Log — SAVE IT.\n\n")
+
+        print(f"\n{LogColors.WARNING} ⚠  Godot Secure has already been applied to this source tree.{LogColors.ENDC}")
+        print(f"     Algorithm   : {prev_algorithm}")
+        print(f"     Godot ver.  : {prev_version}")
+        print(f"     Last applied: {prev_applied}")
+        print(f"     Prev token  : {prev_token}")
+        save_log(f"Refresh mode. Previous run: algorithm={prev_algorithm}, version={prev_version}, applied_at={prev_applied}")
+
+        confirm = input(f"\n\n ⚠   {LogColors.WARNING}Refresh security token on this source tree {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+        if not (confirm == 'y' or confirm == 'yes'):
+            print(save_log("Closing Setup..."))
+            try:
+                input("\nPress Enter key to exit...")
+            except EOFError:
+                pass
+            sys.exit(1)
+        save_log(f"Refresh security token (y/n)?: {confirm}")
+
+        # Regenerate token (allow custom or random)
+        confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+        save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
+        if confirm == 'y' or confirm == 'yes':
+            token_hex = str(input("    Enter Custom Security Token: ")).lower()
+            security_token = hex_to_bytes(token_hex)
+            save_log(f"    Enter Custom Security Token: {token_hex}")
+        token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
+
+        # Write new security_token.h
+        token_h_path = os.path.join(godot_root, "core", "crypto", "security_token.h")
+        print_info(f"Refreshing: {token_h_path}")
+        try:
+            content = "\n".join([
+                "#ifndef SECURITY_TOKEN_H",
+                "#define SECURITY_TOKEN_H",
+                "",
+                "#include \"core/typedefs.h\"",
+                "",
+                "namespace Security {",
+                f"    //Security Token: {token_hex}",
+                f"    static const uint8_t TOKEN[32] = {{ {token_c_array} }};",
+                "};",
+                "",
+                "#endif // SECURITY_TOKEN_H",
+            ])
+            with open(token_h_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print_success(f"security_token.h refreshed with new token: {token_hex}")
+            save_log(f"\nNew Security Token: {token_hex}")
+        except Exception as e:
+            print_error(f"Failed to refresh security_token.h: {e}")
+            try:
+                input("\nPress Enter key to exit...")
+            except EOFError:
+                pass
+            sys.exit(1)
+
+        # Update state file
+        write_state_file(state_file_path, prev_algorithm, prev_version, token_hex)
+        print_success(f"State file updated: {state_file_path}")
+        save_log(f"State file updated at {state_file_path}")
+
+        try:
+            encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
+        except Exception:
+            encKey = "Can't Fetch Your Environment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
+
+        print(f"\n{LogColors.HEADER}=== Token Refresh Complete (View Logs For Info) ==={LogColors.ENDC}\n")
+        print(f"{LogColors.BOLD} New Security Token:{LogColors.ENDC} {token_hex}\n")
+        print(f"{LogColors.WARNING} Encryption Key: {LogColors.FAIL}{encKey}{LogColors.ENDC}")
+        print_warning(f"{LogColors.WARNING} Rebuild Godot and re-export your project with {LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} to apply the new token.{LogColors.ENDC}")
+        save_log(f"\nEncryption Key: {encKey}")
+        save_log(f"\n[WARN] - Rebuild Godot and re-export your project with the Encryption Key to apply the new token.")
+
+        try:
+            input("\nPress Enter key to exit...")
+        except EOFError:
+            pass
+        sys.exit(0)
 
 # --- Version detection ---
 godot_minor = 0
@@ -705,6 +823,10 @@ if __name__ == "__main__":
     print(f"\n\n{LogColors.HEADER}{log}{LogColors.ENDC}")
     apply_modifications(godot_root)
     print(f"\n{LogColors.HEADER}=== Operation Complete (View Logs For Info) ==={LogColors.ENDC}\n")
+    # Write state file so re-runs enter refresh-token mode instead of re-applying all patches
+    write_state_file(state_file_path, algorithm_name, detected_version_str, token_hex)
+    print_success(f"State file written: {state_file_path}")
+    save_log(f"State file written at {state_file_path}")
     if fileCreated:
         print(f"{LogColors.BOLD} Security Token:{LogColors.ENDC} {token_hex}\n")
         print(f"{LogColors.WARNING} Encryption Key: {LogColors.FAIL}{encKey}{LogColors.ENDC}")
