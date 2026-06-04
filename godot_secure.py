@@ -8,26 +8,12 @@ import secrets
 import datetime
 from enum import Enum, auto
 
-# ── Cosmetics ──────────────────────────────────────────────────────────────────
-
-class LogColors:
-    HEADER    = '\033[95m'
-    OKBLUE    = '\033[94m'
-    OKGREEN   = '\033[92m'
-    WARNING   = '\033[93m'
-    FAIL      = '\033[91m'
-    ENDC      = '\033[0m'
-    BOLD      = '\033[1m'
-    UNDERLINE = '\033[4m'
-
 # ── Generation helpers ─────────────────────────────────────────────────────────
-
 def generate_random_tag(length=4):
     return ''.join(random.choices(string.ascii_uppercase, k=length))
 
 def generate_random_token(length=32):
     return bytes([random.randint(0, 255) for _ in range(length)])
-
 
 def generate_magic_header(tag: str, endian='little') -> str:
     if len(tag) != 4:
@@ -83,7 +69,16 @@ def build_random_key_derivation():
     return f"token_key.write[i] = (uint8_t)({expression});"
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-
+class LogColors:
+    HEADER    = '\033[95m'
+    OKBLUE    = '\033[94m'
+    OKGREEN   = '\033[92m'
+    WARNING   = '\033[93m'
+    FAIL      = '\033[91m'
+    ENDC      = '\033[0m'
+    BOLD      = '\033[1m'
+    UNDERLINE = '\033[4m'
+   
 logFileName = None  # set before first log_print call
 
 def save_log(message):
@@ -120,7 +115,6 @@ def init_log(suffix):
         lf.write(f"Created On - {current_dt}\nGodot-Secure log — SAVE IT.\n\n")
 
 # ── Encryption key resolution ──────────────────────────────────────────────────
-
 def _apply_key(key, godot_root, source):
     """Set the env var, write godot.gdkey, echo the key, and log the outcome."""
     os.environ["SCRIPT_AES256_ENCRYPTION_KEY"] = key
@@ -141,7 +135,6 @@ def _apply_key(key, godot_root, source):
         save_log(f"Could not write godot.gdkey: {e}")
     return key
 
-
 def _abort_no_key():
     save_log("No valid encryption key provided. Cannot proceed.")
     print(f"\n{LogColors.FAIL}Operation cannot proceed without a valid SCRIPT_AES256_ENCRYPTION_KEY.{LogColors.ENDC}")
@@ -150,7 +143,6 @@ def _abort_no_key():
     except EOFError:
         pass
     sys.exit(1)
-
 
 def resolve_encryption_key(godot_root):
     """Return the value of SCRIPT_AES256_ENCRYPTION_KEY.
@@ -199,7 +191,6 @@ def resolve_encryption_key(godot_root):
         _abort_no_key()
 
 # ── State file ─────────────────────────────────────────────────────────────────
-
 STATE_FILE_NAME = ".godot_secure"
 
 def write_state_file(state_path, algorithm, godot_version, token):
@@ -242,7 +233,6 @@ CREATED_FILES = [
 ]
 
 # ── Restore ────────────────────────────────────────────────────────────────────
-
 def restore_backups(root_dir, state_path):
     log_print(MsgType.INFO, "Restoring original Godot source files from backups...")
 
