@@ -115,7 +115,7 @@ def print_warning(message):
 
 def init_log(suffix):
     global logFileName
-    logFileName = f"Log-{current_dt}-Godot-Secure-{suffix}.txt"
+    logFileName = f"godot_secure_{suffix}_{current_dt}.log"
     with open(logFileName, "w", encoding="utf-8") as lf:
         lf.write(f"Created On - {current_dt}\nGodot-Secure log — SAVE IT.\n\n")
 
