@@ -27,8 +27,6 @@ def generate_random_tag(length=4):
 def generate_random_token(length=32):
     return bytes([random.randint(0, 255) for _ in range(length)])
 
-def hex_to_bytes(hex_string: str) -> bytes:
-    return bytes.fromhex(hex_string)
 
 def generate_magic_header(tag: str, endian='little') -> str:
     if len(tag) != 4:
@@ -487,7 +485,7 @@ def prompt_token_options(default_token_hex, default_security_token):
     save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
     if confirm in ('y', 'yes'):
         token_hex      = str(input("    Enter Custom Security Token: ")).lower()
-        security_token = hex_to_bytes(token_hex)
+        security_token = bytes.fromhex(token_hex)
         save_log(f"    Enter Custom Security Token: {token_hex}")
 
     token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
@@ -956,7 +954,7 @@ elif menu_choice == "2":
     save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
     if confirm in ('y', 'yes'):
         token_hex      = str(input("    Enter Custom Security Token: ")).lower()
-        security_token = hex_to_bytes(token_hex)
+        security_token = bytes.fromhex(token_hex)
         save_log(f"    Enter Custom Security Token: {token_hex}")
     token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
 
