@@ -15,7 +15,7 @@ class LogColors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
-    
+
 def generate_random_tag(length=4):
     return ''.join(random.choices(string.ascii_uppercase, k=length))
 
@@ -28,10 +28,8 @@ def hex_to_bytes(hex_string: str) -> bytes:
 def generate_magic_header(tag: str, endian='little') -> str:
     if len(tag) != 4:
         raise ValueError("Tag must be exactly 4 characters.")
-    
     if endian == 'little':
-        tag = tag[::-1]  # Reverse for little-endian
-
+        tag = tag[::-1]
     hex_value = "0x" + ''.join(f"{ord(c):02X}" for c in tag)
     return hex_value
 
@@ -62,7 +60,7 @@ def build_random_key_derivation():
         return shift, 8 - shift
 
     def rand_const():
-        return secrets.randbelow(255) + 1  # never zero
+        return secrets.randbelow(255) + 1
 
     layers = secrets.randbelow(5) + 2
 
@@ -70,23 +68,20 @@ def build_random_key_derivation():
     b = operands[1] if a == operands[0] else operands[0]
     shift, rshift = rotation()
 
-    expression = secrets.choice(base_ops).format(a=a,b=b,shift=shift,rshift=rshift,const=rand_const())
+    expression = secrets.choice(base_ops).format(a=a, b=b, shift=shift, rshift=rshift, const=rand_const())
 
     for _ in range(layers - 1):
         shift, rshift = rotation()
         value = secrets.choice(operands)
-
-        # never allow identical cancellation
         if value == expression:
             value = secrets.choice(operands)
-
-        expression = secrets.choice(chain_ops).format(expr=expression,value=value,shift=shift,rshift=rshift,const=rand_const())
+        expression = secrets.choice(chain_ops).format(expr=expression, value=value, shift=shift, rshift=rshift, const=rand_const())
 
     return f"token_key.write[i] = (uint8_t)({expression});"
 
 def save_log(message):
     if not str(message).find("\033[") > 0:
-        with open(logFileName,"a", encoding="utf-8") as logf: logf.write(f"{message}\n")
+        with open(logFileName, "a", encoding="utf-8") as logf: logf.write(f"{message}\n")
     return message
 
 def print_success(message):
@@ -100,7 +95,7 @@ def print_error(message):
 def print_info(message):
     save_log(f"\n[INFO] -   {message}")
     print(f"\n{LogColors.OKBLUE} ℹ {LogColors.ENDC} {message}")
-    
+
 def print_operation(message):
     save_log(f"   [=>] {message}")
     print(f"{LogColors.HEADER}   =>{LogColors.ENDC} {message}")
@@ -126,117 +121,156 @@ key_derivation_algorithm = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i]
 fileCreated = True
 backup_path = None
 current_dt = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
-logFileName = f"Log-{current_dt}-Godot-Secure-AES.txt"
 
-# Backup Properties
+# Backup properties
 quiz_override = False
 override_backup = True
 not_modify_on_error = True
 track_backup_file = set()
 
 
-# Start Script Startup Operations
+# --- Startup: resolve Godot source root ---
 if len(sys.argv) == 1:
-    # No argument provided, use current directory
     godot_root = os.getcwd()
     print("\nNo directory specified. Using current directory as Godot Source Root.")
 elif len(sys.argv) == 2:
-    # One argument provided, use it as Godot root
     godot_root = sys.argv[1]
 else:
-    # Too many arguments provided
-    print("\nUsage: python Godot_Secure.py <godot_source_root>")
+    print("\nUsage: python godot_secure.py <godot_source_root>")
     try:
-        exit = input("\nPress Enter key to exit...")
+        input("\nPress Enter key to exit...")
     except EOFError:
         pass
     sys.exit(1)
-    
 
-# Log File Creation
-with open(logFileName, "w", encoding="utf-8") as logf: logf.write(f"Created On - {current_dt}\nThis is Godot-Secure Log file, SAVE IT to secure place for later getting values.\n\n")
-
-# Check for required Godot source components
+# Validate Godot source structure
 core_dir = os.path.join(godot_root, "core")
 sconstruct_file = os.path.join(godot_root, "SConstruct")
 
-# Get Current Encryption Key From Enviroment
-try:
-    encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
-except:
-    encKey = "Can't Fetch Your Enviroment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
-
 if not (os.path.isdir(core_dir) and os.path.isfile(sconstruct_file)):
-    log = save_log("Error: No valid Godot Source Detected in the Specified Directory.")
-    print(f"{LogColors.FAIL}{log}{LogColors.ENDC}")
+    # Log file not yet created, print directly
+    print(f"{LogColors.FAIL}Error: No valid Godot Source Detected in the Specified Directory.{LogColors.ENDC}")
     try:
-        exit = input("\nPress Enter key to exit...")
+        input("\nPress Enter key to exit...")
     except EOFError:
         pass
     sys.exit(1)
 
-print(save_log(f"\nUsing Godot Source Root: {godot_root}"))
+# --- Version detection ---
+godot_minor = 0
+version_py = os.path.join(godot_root, "version.py")
+if os.path.isfile(version_py):
+    version_vars = {}
+    try:
+        with open(version_py, encoding="utf-8") as vf:
+            exec(vf.read(), version_vars)
+        godot_minor = int(version_vars.get("minor", 0))
+        godot_major = int(version_vars.get("major", 4))
+        godot_patch = int(version_vars.get("patch", 0))
+        godot_status = version_vars.get("status", "unknown")
+        detected_version_str = f"{godot_major}.{godot_minor}.{godot_patch}-{godot_status}"
+    except Exception as e:
+        print(f"{LogColors.WARNING}Warning: Could not parse version.py ({e}). Assuming v4.5.x code paths.{LogColors.ENDC}")
+        detected_version_str = "unknown"
+else:
+    print(f"{LogColors.WARNING}Warning: version.py not found. Assuming v4.5.x code paths.{LogColors.ENDC}")
+    detected_version_str = "unknown"
+
+# Use .ptr() on Godot 4.6+, .ptrw() on older versions
+compress_ptr = "compressed.ptr()" if godot_minor >= 6 else "compressed.ptrw()"
+
+# Confirm start
+print(f"\nUsing Godot Source Root: {godot_root}")
+print(f"Detected Godot Version : {detected_version_str}")
 confirm = input(f"\n\n ⚠   {LogColors.WARNING}Start Godot Secure Operations on Godot Source Root {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
 if not (confirm == 'y' or confirm == 'yes'):
-    print(save_log("Closing Setup..."))
+    print("Closing Setup...")
     try:
-        exit = input("\nPress Enter key to exit...")
+        input("\nPress Enter key to exit...")
     except EOFError:
         pass
     sys.exit(1)
-    
-save_log(f"Start Godot Secure Operations on Godot Source Root (y/n)?: {confirm}")
 
+# --- Algorithm selection ---
+print(f"\n\n ℹ  {LogColors.OKBLUE}Choose Encryption Algorithm:{LogColors.ENDC}")
+print(f"     [1] AES-256  (default)")
+print(f"     [2] Camellia-256")
+algo_choice = input(f"     {LogColors.FAIL}Enter choice [1/2]:{LogColors.ENDC} ").strip()
+use_aes = algo_choice != "2"
+algorithm_name = "AES-256" if use_aes else "Camellia-256"
+ctx_class = "CryptoCore::AESContext" if use_aes else "CryptoCore::CamelliaContext"
+export_title = f"Export With Godot Secure ({algorithm_name})"
+
+# --- Log file (created after algorithm is known) ---
+logFileName = f"Log-{current_dt}-Godot-Secure-{'AES' if use_aes else 'Camellia'}.txt"
+with open(logFileName, "w", encoding="utf-8") as logf:
+    logf.write(f"Created On - {current_dt}\nThis is Godot-Secure Log file, SAVE IT to secure place for later getting values.\n\n")
+
+save_log(f"\nUsing Godot Source Root: {godot_root}")
+save_log(f"Detected Godot Version : {detected_version_str} (minor={godot_minor}, compress_ptr={compress_ptr})")
+save_log(f"Algorithm: {algorithm_name}")
+save_log(f"Start Godot Secure Operations on Godot Source Root (y/n)?: {confirm}")
+save_log(f"Choose Encryption Algorithm [1/2]?: {algo_choice} -> {algorithm_name}")
+
+# Get current encryption key from environment
+try:
+    encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
+except Exception:
+    encKey = "Can't Fetch Your Environment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
+
+# --- Custom headers ---
 confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Headers {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
 save_log(f"\n[INFO] - Use Custom Headers (y/n)?: {confirm}")
-if (confirm == 'y' or confirm == 'yes'):
+if confirm == 'y' or confirm == 'yes':
     baseTag = input("    Enter Custom Magic Header (e.g. GDPC): ").upper()
     baseHeader = generate_magic_header(baseTag)
     encTag = input("    Enter Custom Encrypted Magic Header (e.g. GDEC): ").upper()
     encHeader = generate_magic_header(encTag)
     save_log(f"    Enter Custom Magic Header (e.g. GDPC): {baseTag}\n    Enter Custom Encrypted Magic Header (e.g. GDEC): {encTag}")
 
+# --- Custom token ---
 confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
 save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
-if (confirm == 'y' or confirm == 'yes'):
+if confirm == 'y' or confirm == 'yes':
     token_hex = str(input("    Enter Custom Security Token: ")).lower()
     security_token = hex_to_bytes(token_hex)
     token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
     save_log(f"    Enter Custom Security Token: {token_hex}")
 
+# --- Advanced key derivation ---
 confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Advanced Key Derivation {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
 save_log(f"\n[INFO] - Use Advanced Key Derivation (y/n)?: {confirm}")
-if (confirm == 'y' or confirm == 'yes'):
+if confirm == 'y' or confirm == 'yes':
     key_derivation_algorithm = build_random_key_derivation()
     save_log(f"    Generated Advanced Key Derivation Algorithm:\n            {key_derivation_algorithm}")
 
-# Modifications to be made in source
+
+# --- Build MODIFICATIONS list ---
 MODIFICATIONS = [
-    #Pre -Steps:
+    # Pre-step: version.py title
     {
         "file": "version.py",
         "operations": [
             {
                 "type": "replace_line",
-                "description": "Modify Godot title To add Godot Secure",
+                "description": "Modify Godot title to add Godot Secure",
                 "find": "name = \"Godot Engine\"",
                 "replace": "name = \"Godot Engine (With Godot Secure)\""
             }
         ]
     },
-    
+    # Pre-step: export dialog title
     {
         "file": "editor/export/project_export.cpp",
         "operations": [
             {
                 "type": "replace_line",
-                "description": "Modify Godot export popup title To add Godot Secure",
+                "description": "Modify Godot export popup title to add Godot Secure",
                 "find": "set_title(TTR(\"Export\"));",
-                "replace": "set_title(TTR(\"Export With Godot Secure (AES-256)\"));"
+                "replace": f"set_title(TTR(\"{export_title}\"));"
             }
         ]
     },
-
     # Step 0: Create security token header
     {
         "file": "core/crypto/security_token.h",
@@ -260,7 +294,7 @@ MODIFICATIONS = [
             }
         ]
     },
-    # Step 1: Magic Header Modification (Packed)
+    # Step 1: Magic header (packed)
     {
         "file": "core/io/file_access_pack.h",
         "operations": [
@@ -272,7 +306,7 @@ MODIFICATIONS = [
             }
         ]
     },
-    # Step 2: Magic Header Modification (Encrypted)
+    # Step 2: Magic header (encrypted)
     {
         "file": "core/io/file_access_encrypted.h",
         "operations": [
@@ -284,7 +318,7 @@ MODIFICATIONS = [
             }
         ]
     },
-    # Step 3: Modify AES Decryption + Token Integration
+    # Step 3: Decryption block + token integration
     {
         "file": "core/io/file_access_encrypted.cpp",
         "operations": [
@@ -307,7 +341,7 @@ MODIFICATIONS = [
                 ],
                 "replace": [
                     "{",
-                    "CryptoCore::AESContext ctx;",
+                    f"{ctx_class} ctx;",
                     "",
                     "    // Apply security token to key",
                     "    Vector<uint8_t> token_key;",
@@ -324,7 +358,7 @@ MODIFICATIONS = [
             }
         ]
     },
-    # Step 4: Modify AES Encryption + Token Integration
+    # Step 4: Encryption block + token integration
     {
         "file": "core/io/file_access_encrypted.cpp",
         "operations": [
@@ -336,17 +370,17 @@ MODIFICATIONS = [
                     "ctx.set_encode_key(key.ptrw(), 256);",
                     "",
                     "if (use_magic) {",
-                    "file->store_32(ENCRYPTED_HEADER_MAGIC);",
+                    "    file->store_32(ENCRYPTED_HEADER_MAGIC);",
                     "}",
                     "",
                     "file->store_buffer(hash, 16);",
                     "file->store_64(data.size());",
                     "file->store_buffer(iv.ptr(), 16);",
                     "",
-                    "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptrw(), compressed.ptrw());"
+                    f"ctx.encrypt_cfb(len, iv.ptrw(), {compress_ptr}, {compress_ptr});"
                 ],
                 "replace": [
-                    "CryptoCore::AESContext ctx;",
+                    f"{ctx_class} ctx;",
                     "",
                     "    // Apply security token to key",
                     "    Vector<uint8_t> token_key;",
@@ -366,12 +400,122 @@ MODIFICATIONS = [
                     "file->store_64(data.size());",
                     "file->store_buffer(iv.ptr(), 16);",
                     "",
-                    "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptrw(), compressed.ptrw());"
+                    f"ctx.encrypt_cfb(len, iv.ptrw(), {compress_ptr}, {compress_ptr});"
                 ]
             }
         ]
-    }
+    },
 ]
+
+# Camellia-only: inject CamelliaContext class and implementation
+if not use_aes:
+    MODIFICATIONS += [
+        # Step 5: Add CamelliaContext class declaration to crypto_core.h
+        {
+            "file": "core/crypto/crypto_core.h",
+            "operations": [
+                {
+                    "type": "insert_after",
+                    "description": "Add CamelliaContext class",
+                    "find": "};",
+                    "replace": [
+                        "// Camellia-256 (via Mbed TLS)",
+                        "class CamelliaContext {",
+                        "private:",
+                        "    void *ctx = nullptr;",
+                        "",
+                        "public:",
+                        "    CamelliaContext();",
+                        "    ~CamelliaContext();",
+                        "",
+                        "    Error set_encode_key(const uint8_t *p_key, size_t p_bits);",
+                        "    Error set_decode_key(const uint8_t *p_key, size_t p_bits);",
+                        "    Error encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
+                        "    Error decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
+                        "    Error encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "    Error decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "    Error encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "    Error decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "};",
+                        ""
+                    ]
+                }
+            ]
+        },
+        # Step 6: Add Camellia implementation to crypto_core.cpp
+        {
+            "file": "core/crypto/crypto_core.cpp",
+            "operations": [
+                {
+                    "type": "insert_after",
+                    "description": "Add Camellia include",
+                    "find": "#include <mbedtls/aes.h>",
+                    "replace": "#include <mbedtls/camellia.h>"
+                },
+                {
+                    "type": "append",
+                    "description": "Add Camellia implementation",
+                    "replace": [
+                        "// ----------------------------------------------------------------",
+                        "// Camellia-256 implementation",
+                        "",
+                        "CryptoCore::CamelliaContext::CamelliaContext() {",
+                        "    ctx = memalloc(sizeof(mbedtls_camellia_context));",
+                        "    mbedtls_camellia_init((mbedtls_camellia_context *)ctx);",
+                        "}",
+                        "",
+                        "CryptoCore::CamelliaContext::~CamelliaContext() {",
+                        "    mbedtls_camellia_free((mbedtls_camellia_context *)ctx);",
+                        "    memfree(ctx);",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::set_encode_key(const uint8_t *p_key, size_t p_bits) {",
+                        "    int ret = mbedtls_camellia_setkey_enc((mbedtls_camellia_context *)ctx, p_key, p_bits);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::set_decode_key(const uint8_t *p_key, size_t p_bits) {",
+                        "    int ret = mbedtls_camellia_setkey_dec((mbedtls_camellia_context *)ctx, p_key, p_bits);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
+                        "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_src, r_dst);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
+                        "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_src, r_dst);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                        "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, r_iv, p_src, r_dst);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                        "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, r_iv, p_src, r_dst);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                        "    size_t iv_off = 0;",
+                        "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
+                        "    return ret ? FAILED : OK;",
+                        "}",
+                        "",
+                        "Error CryptoCore::CamelliaContext::decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                        "    size_t iv_off = 0;",
+                        "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
+                        "    return ret ? FAILED : OK;",
+                        "}"
+                    ]
+                }
+            ]
+        },
+    ]
+
 
 def apply_modifications(root_dir):
     global override_backup, quiz_override
@@ -379,12 +523,12 @@ def apply_modifications(root_dir):
     print_info(f"Generated PACK_HEADER_MAGIC : {baseHeader} //Tag : {baseTag}")
     print_info(f"Generated ENCRYPTED_HEADER_MAGIC : {encHeader} //Tag : {encTag}")
     print_info(f"Security Token: {token_hex}")
-    
+
     step = 0
     for mod in MODIFICATIONS:
         file_path = os.path.join(root_dir, mod["file"])
         step += 1
-        
+
         # Handle file creation separately
         if any(op.get("type") == "create_file" for op in mod["operations"]):
             print_info(f"Step {step} (Creating: {file_path}):")
@@ -392,7 +536,7 @@ def apply_modifications(root_dir):
                 if op["type"] == "create_file":
                     print_operation(f"Operation: {op['description']}")
                     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                    
+
                     if os.path.exists(file_path):
                         print_warning(f"File already exists: {file_path}")
                         choice = input("   Do you want to overwrite it? (y/n): ").strip().lower()
@@ -402,7 +546,6 @@ def apply_modifications(root_dir):
                             fileCreated = False
                             continue
 
-                        # Backup existing file
                         global backup_path
                         backup_path = file_path + ".backup"
                         try:
@@ -425,44 +568,42 @@ def apply_modifications(root_dir):
                         print_error(f"Failed to write file: {e}")
             continue
 
-        
         # Handle file modifications
         if not os.path.exists(file_path):
             print_error(f"File not found: {file_path}")
             continue
-        else:
-            local_backup = file_path + ".backup"
 
-            if not (local_backup in track_backup_file):
-                track_backup_file.add(local_backup)
-                create_backup = True
+        local_backup = file_path + ".backup"
 
-                if os.path.exists(local_backup):
-                    if not quiz_override:
-                        quiz_override = True
-                        print_warning(f"Backup of origins file already exists")
-                        override_backup = input("   Do you want to overwrite it? (y/n): ").strip().lower()
-                        if not (override_backup == 'y' or override_backup == 'yes'):
-                            override_backup = False
-                    
-                    create_backup = override_backup
+        if local_backup not in track_backup_file:
+            track_backup_file.add(local_backup)
+            create_backup = True
 
-                if create_backup:
-                    try:
-                        with open(file_path, 'r') as file0:
-                            content = file0.read()
-                            with open(local_backup, "w") as file1:
-                                file1.write(content)
-                            print_success(f"Backup File created: {local_backup}")
-                    except Exception as e:
-                        print_error(f"Failed to created backup of origin file: {e}")
+            if os.path.exists(local_backup):
+                if not quiz_override:
+                    quiz_override = True
+                    print_warning(f"Backup of origin file already exists")
+                    override_backup = input("   Do you want to overwrite it? (y/n): ").strip().lower()
+                    if not (override_backup == 'y' or override_backup == 'yes'):
+                        override_backup = False
 
-                        if not_modify_on_error:
-                            print_operation("Skipping file modification.")
-                            continue
-            
+                create_backup = override_backup
+
+            if create_backup:
+                try:
+                    with open(file_path, 'r') as file0:
+                        content = file0.read()
+                        with open(local_backup, "w") as file1:
+                            file1.write(content)
+                        print_success(f"Backup File created: {local_backup}")
+                except Exception as e:
+                    print_error(f"Failed to create backup of origin file: {e}")
+                    if not_modify_on_error:
+                        print_operation("Skipping file modification.")
+                        continue
+
         print_info(f"Step {step} (Processing: {file_path}):")
-        
+
         with open(file_path, "r") as f:
             lines = f.readlines()
 
@@ -516,13 +657,12 @@ def apply_modifications(root_dir):
 
                 for i in range(len(lines)):
                     if lines[i].strip() == find:
-                        # Check if replacement already exists
                         already_present = True
                         for j, rep_line in enumerate(replace_lines):
                             if i + 1 + j >= len(lines) or lines[i + 1 + j] != rep_line:
                                 already_present = False
                                 break
-                        
+
                         if not already_present:
                             lines[i+1:i+1] = replace_lines
                             print_success(f"Inserted after line {i+1}")
@@ -539,7 +679,6 @@ def apply_modifications(root_dir):
                 replace_lines = [ln + "\n" for ln in op["replace"]]
                 already_present = False
 
-                # Check if the ending lines match
                 if len(lines) >= len(replace_lines):
                     already_present = all(
                         lines[-len(replace_lines) + i] == replace_lines[i]
@@ -560,24 +699,25 @@ def apply_modifications(root_dir):
         else:
             print_warning(f"No changes made to file (Step {step})")
 
+
 if __name__ == "__main__":
-    log = save_log("\n=== Applying Enhanced AES Encryption For Godot ===")
+    log = save_log(f"\n=== Applying Enhanced {algorithm_name} Encryption For Godot ===")
     print(f"\n\n{LogColors.HEADER}{log}{LogColors.ENDC}")
     apply_modifications(godot_root)
     print(f"\n{LogColors.HEADER}=== Operation Complete (View Logs For Info) ==={LogColors.ENDC}\n")
-    if fileCreated == True:
+    if fileCreated:
         print(f"{LogColors.BOLD} Security Token:{LogColors.ENDC} {token_hex}\n")
         print(f"{LogColors.WARNING} Encryption Key: {LogColors.FAIL}{encKey}{LogColors.ENDC}")
         print_warning(f"{LogColors.WARNING} Security Token and Encryption Key are different. Use {LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} During Export!{LogColors.ENDC}")
         print_success(f"{LogColors.OKGREEN} Build is now Cryptographically Unique{LogColors.ENDC}")
         save_log(f"\nSecurity Token: {token_hex}\nEncryption Key: {encKey}")
         save_log(f"\n[WARN] - Security Token and Encryption Key are different. Use Encryption Key During Export!")
-        if not (backup_path == None):
+        if backup_path is not None:
             save_log(f"\n[INFO] - Old Key Backup Created at: {backup_path}")
             print_info(f"{LogColors.OKGREEN} Old Key Backup Created at: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
-    
+
     try:
-        exit = input("\nPress Enter key to exit...")
+        input("\nPress Enter key to exit...")
     except EOFError:
         pass
     sys.exit(1)
