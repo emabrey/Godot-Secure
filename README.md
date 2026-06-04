@@ -34,13 +34,92 @@ After patching you compile Godot from source exactly as you normally would.
 
 ## Usage
 
-Run the script from anywhere, passing the path to your Godot source root as the only argument. If no argument is given the current directory is used.
-
 ```
-python godot_secure.py <path-to-godot-source>
+python godot_secure.py [GODOT_SOURCE_ROOT] [options]
 ```
 
-The script validates that the target directory looks like a Godot source tree (presence of `core/` and `SConstruct`) and reads `version.py` to detect the engine version before presenting the menu.
+`GODOT_SOURCE_ROOT` is the path to your Godot C++ source tree. If omitted the current directory is used. The script validates that the target contains `core/` and `SConstruct`, then reads `version.py` to detect the engine version.
+
+### Command-line options
+
+All interactive prompts have a corresponding CLI option. When every required option is supplied alongside `--non-interactive` the script runs fully headlessly with no stdin required — suitable for GitHub Actions and other CI pipelines.
+
+#### Mode
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--mode` | `apply` · `refresh` · `restore` | Operation to perform. Replaces the interactive main menu. |
+
+#### Apply options
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--algorithm` | `aes` · `camellia` | Encryption algorithm. Default: `aes`. |
+| `--base-tag` | 4-char ASCII | Magic header tag for pack files. |
+| `--enc-tag` | 4-char ASCII | Magic header tag for encrypted files. |
+| `--advanced-kdf` | *(flag)* | Generate a randomized multi-layer key derivation formula. |
+
+#### Encryption key options *(apply and refresh)*
+
+`--key` and `--generate-key` are mutually exclusive. If neither is supplied and `SCRIPT_AES256_ENCRYPTION_KEY` is not set, the script prompts interactively (or exits with an error under `--non-interactive`).
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--key` | 64-char hex | Supply an existing encryption key. Sets `SCRIPT_AES256_ENCRYPTION_KEY`. |
+| `--generate-key` | *(flag)* | Generate a new 256-bit key, write it to `godot.gdkey`, and set `SCRIPT_AES256_ENCRYPTION_KEY`. |
+
+#### Token option *(apply and refresh)*
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--token` | 64-char hex | Security token to embed in the engine binary. A random token is generated when omitted. |
+
+#### Behaviour
+
+| Option | Description |
+|--------|-------------|
+| `--non-interactive` | Skip all confirmation prompts and `Press Enter` pauses. All omitted values use their defaults. **Required for CI.** |
+
+### Examples
+
+```bash
+# Interactive run (default — presents the menu)
+python godot_secure.py /path/to/godot
+
+# Fully non-interactive CI apply with AES-256, auto-generated key and advanced KDF
+python godot_secure.py /path/to/godot \
+    --mode apply --algorithm aes \
+    --generate-key --advanced-kdf \
+    --non-interactive
+
+# Non-interactive apply with a key stored in an environment variable
+export SCRIPT_AES256_ENCRYPTION_KEY=<your-64-char-hex-key>
+python godot_secure.py /path/to/godot \
+    --mode apply --algorithm aes --advanced-kdf \
+    --non-interactive
+
+# Refresh the security token (key read from SCRIPT_AES256_ENCRYPTION_KEY)
+python godot_secure.py /path/to/godot --mode refresh --non-interactive
+
+# Restore original source files
+python godot_secure.py /path/to/godot --mode restore --non-interactive
+```
+
+### GitHub Actions example
+
+```yaml
+- name: Patch Godot source
+  env:
+    SCRIPT_AES256_ENCRYPTION_KEY: ${{ secrets.GODOT_ENCRYPTION_KEY }}
+  run: |
+    python godot_secure.py vendored/godot \
+      --mode apply \
+      --algorithm aes \
+      --advanced-kdf \
+      --non-interactive
+```
+
+Store `GODOT_ENCRYPTION_KEY` as an [encrypted Actions secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets). The log file written by the script contains the Security Token — upload it as a CI artifact or pipe it to a secrets store so the value is not lost.
 
 ---
 
