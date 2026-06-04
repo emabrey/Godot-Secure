@@ -124,7 +124,6 @@ def init_log(suffix):
 def _apply_key(key, godot_root, source):
     """Set the env var, write godot.gdkey, echo the key, and log the outcome."""
     os.environ["SCRIPT_AES256_ENCRYPTION_KEY"] = key
-    print(f"\n{LogColors.BOLD} Encryption Key:{LogColors.ENDC} {key}\n")
     key_file = os.path.join(godot_root, "godot.gdkey")
     try:
         with open(key_file, "w", encoding="utf-8") as kf:
@@ -217,7 +216,7 @@ def read_state_file(state_path):
     with open(state_path, encoding="utf-8") as sf:
         return json.load(sf)
 
-# ── File lists (mirrors restore_backup.py) ────────────────────────────────────
+# ── File lists for backup restoration  ────────────────────────────────────
 
 # All files that may have .backup copies after a Godot Secure run.
 # security_token.h is created (not modified), so it is deleted on restore rather
@@ -897,13 +896,17 @@ if menu_choice == "1":
     print_success(f"State file written: {state_file_path}")
     save_log(f"State file written at {state_file_path}")
 
-    print(f"\n{LogColors.HEADER}=== Operation Complete (View Logs For Info) ==={LogColors.ENDC}\n")
-    print(f"{LogColors.BOLD} Security Token: {LogColors.ENDC}{token_hex}")
-    print(f"{LogColors.BOLD} Encryption Key: {LogColors.ENDC}{encKey}\n")
+    print(f"\n{LogColors.HEADER}=== Operation Complete ==={LogColors.ENDC}")
+    print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}")
+    print(f"{LogColors.BOLD}  SAVE THESE VALUES — YOU CANNOT RECOVER THEM LATER{LogColors.ENDC}")
+    print(f"{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
+    print(f"{LogColors.BOLD}  Security Token:{LogColors.ENDC}  {token_hex}")
+    print(f"{LogColors.BOLD}  Encryption Key:{LogColors.ENDC}  {encKey}")
+    print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
     print_warning(
         "The Security Token is embedded in the compiled engine binary. "
-        f"The Encryption Key is what you enter in Godot's export preset — use "
-        f"{LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} during export, not the Security Token."
+        f"Enter the {LogColors.FAIL}Encryption Key{LogColors.WARNING} in Godot's export preset — "
+        "not the Security Token."
     )
     print_warning("Store both values in secure storage — they are required to re-export or rebuild.")
     print_success(f"{LogColors.OKGREEN} Build is now Cryptographically Unique{LogColors.ENDC}")
@@ -974,9 +977,13 @@ elif menu_choice == "2":
     print_success(f"State file updated: {state_file_path}")
     save_log(f"State file updated at {state_file_path}")
 
-    print(f"\n{LogColors.HEADER}=== Token Refresh Complete (View Logs For Info) ==={LogColors.ENDC}\n")
-    print(f"{LogColors.BOLD} New Security Token: {LogColors.ENDC}{token_hex}")
-    print(f"{LogColors.BOLD} Encryption Key:     {LogColors.ENDC}{encKey}\n")
+    print(f"\n{LogColors.HEADER}=== Token Refresh Complete ==={LogColors.ENDC}")
+    print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}")
+    print(f"{LogColors.BOLD}  SAVE THESE VALUES — YOU CANNOT RECOVER THEM LATER{LogColors.ENDC}")
+    print(f"{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
+    print(f"{LogColors.BOLD}  New Security Token:{LogColors.ENDC}  {token_hex}")
+    print(f"{LogColors.BOLD}  Encryption Key:    {LogColors.ENDC}  {encKey}")
+    print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
     print_warning("Rebuild Godot and re-export your project with the Encryption Key to apply the new token.")
     print_warning("Store both values in secure storage — they are required to re-export or rebuild.")
     save_log(f"\nNew Security Token: {token_hex}\nEncryption Key: {encKey}")
