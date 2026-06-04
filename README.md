@@ -2,6 +2,12 @@
   <img src="Logos/PNGs/Godot Secure.png" alt="Godot Secure" width="360" />
 </p>
 
+<p align="center">
+  <a href="https://ko-fi.com/V7V41FR21F" target="_blank">
+    <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
+  </a>
+</p>
+
 # Godot Secure
 
 Godot Secure patches the Godot Engine C++ source code to replace the default AES-256 encryption with a cryptographically unique build — one whose pack headers, encrypted-file headers, and key derivation are all randomized at patch time so that no two Godot Secure builds share the same encryption fingerprint.
@@ -311,3 +317,13 @@ Keep the Apply log somewhere safe. It is the only record of the exact header mag
 |------|--------|
 | `core/crypto/crypto_core.h` | Adds the `CamelliaContext` class declaration |
 | `core/crypto/crypto_core.cpp` | Adds the full `CamelliaContext` implementation via mbedTLS |
+
+---
+
+## Support
+
+Godot Secure is free and open-source. If you find it useful, consider supporting its development:
+
+<a href="https://ko-fi.com/V7V41FR21F" target="_blank">
+  <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
+</a>
