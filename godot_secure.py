@@ -6,6 +6,7 @@ import string
 import binascii
 import secrets
 import datetime
+from enum import Enum, auto
 
 # ── Cosmetics ──────────────────────────────────────────────────────────────────
 
@@ -83,7 +84,7 @@ def build_random_key_derivation():
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
-logFileName = None  # set before first save_log call
+logFileName = None  # set before first log_print call
 
 def save_log(message):
     if logFileName and not str(message).find("\033[") > 0:
@@ -91,25 +92,26 @@ def save_log(message):
             lf.write(f"{message}\n")
     return message
 
-def print_success(message):
-    save_log(f"      [✓] {message}")
-    print(f"{LogColors.OKGREEN}      ✓{LogColors.ENDC} {message}")
 
-def print_error(message):
-    save_log(f"      [✗] {message}\n")
-    print(f"{LogColors.FAIL}      ✗{LogColors.ENDC} {message}")
+class MsgType(Enum):
+    SUCCESS   = auto()
+    ERROR     = auto()
+    INFO      = auto()
+    OPERATION = auto()
+    WARNING   = auto()
 
-def print_info(message):
-    save_log(f"\n[INFO] -   {message}")
-    print(f"\n{LogColors.OKBLUE} ℹ {LogColors.ENDC} {message}")
+_MSG_CONFIG = {
+    MsgType.SUCCESS:   (LogColors.OKGREEN,  "      ✓", "      [✓] ", ""),
+    MsgType.ERROR:     (LogColors.FAIL,     "      ✗", "      [✗] ", "\n"),
+    MsgType.INFO:      (LogColors.OKBLUE,   " ℹ ",     "\n[INFO] -   ", "\n"),
+    MsgType.OPERATION: (LogColors.HEADER,   "   =>",   "   [=>] ",    ""),
+    MsgType.WARNING:   (LogColors.WARNING,  " ⚠ ",     "\n[WARN] -   ", "\n"),
+}
 
-def print_operation(message):
-    save_log(f"   [=>] {message}")
-    print(f"{LogColors.HEADER}   =>{LogColors.ENDC} {message}")
-
-def print_warning(message):
-    save_log(f"\n[WARN] -   {message}")
-    print(f"\n{LogColors.WARNING} ⚠ {LogColors.ENDC} {message}")
+def log_print(msg_type: MsgType, message: str):
+    color, symbol, log_prefix, leading = _MSG_CONFIG[msg_type]
+    save_log(f"{log_prefix}{message}")
+    print(f"{leading}{color}{symbol}{LogColors.ENDC} {message}")
 
 def init_log(suffix):
     global logFileName
@@ -126,15 +128,15 @@ def _apply_key(key, godot_root, source):
     try:
         with open(key_file, "w", encoding="utf-8") as kf:
             kf.write(key)
-        print_success(f"Key written to: {key_file}")
-        print_warning(
+        log_print(MsgType.SUCCESS, f"Key written to: {key_file}")
+        log_print(MsgType.WARNING, 
             f"Store this key and {LogColors.BOLD}godot.gdkey{LogColors.ENDC}{LogColors.WARNING} in "
             "secure storage — they must never be committed to version control."
         )
         save_log(f"Encryption Key ({source}): {key}")
         save_log(f"Key written to: {key_file}")
     except Exception as e:
-        print_error(f"Could not write godot.gdkey ({e}). Key is set for this session only.")
+        log_print(MsgType.ERROR, f"Could not write godot.gdkey ({e}). Key is set for this session only.")
         save_log(f"Encryption Key ({source}): {key}")
         save_log(f"Could not write godot.gdkey: {e}")
     return key
@@ -166,12 +168,12 @@ def resolve_encryption_key(godot_root):
         return raw
 
     if raw:
-        print_warning(
+        log_print(MsgType.WARNING, 
             "SCRIPT_AES256_ENCRYPTION_KEY is set but is not a valid 256-bit hex key "
             f"(expected 64 hex characters, got {len(raw)})."
         )
     else:
-        print_warning("SCRIPT_AES256_ENCRYPTION_KEY has not been configured.")
+        log_print(MsgType.WARNING, "SCRIPT_AES256_ENCRYPTION_KEY has not been configured.")
 
     print(f"\n  How would you like to provide an encryption key?\n")
     print(f"    [1] Enter my own 64-character hex key")
@@ -186,7 +188,7 @@ def resolve_encryption_key(godot_root):
             if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
                 save_log("User supplied a custom encryption key.")
                 return _apply_key(value, godot_root, "user-supplied")
-            print_error("Invalid key — must be exactly 64 hexadecimal characters. Please try again.")
+            log_print(MsgType.ERROR, "Invalid key — must be exactly 64 hexadecimal characters. Please try again.")
 
     elif choice == "2":
         new_key = secrets.token_hex(32)  # 32 bytes = 64 hex chars = 256 bits
@@ -242,7 +244,7 @@ CREATED_FILES = [
 # ── Restore ────────────────────────────────────────────────────────────────────
 
 def restore_backups(root_dir, state_path):
-    print_info("Restoring original Godot source files from backups...")
+    log_print(MsgType.INFO, "Restoring original Godot source files from backups...")
 
     all_ok = True
 
@@ -252,19 +254,19 @@ def restore_backups(root_dir, state_path):
 
         if not os.path.exists(backup_path):
             if rel_path not in CAMELLIA_ONLY_FILES:
-                print_warning(f"Backup not found, skipping: {rel_path}")
+                log_print(MsgType.WARNING, f"Backup not found, skipping: {rel_path}")
                 all_ok = False
             continue
 
         try:
             if os.path.exists(file_path):
                 os.replace(backup_path, file_path)
-                print_success(f"Restored: {rel_path}")
+                log_print(MsgType.SUCCESS, f"Restored: {rel_path}")
             else:
                 os.rename(backup_path, file_path)
-                print_success(f"Restored (from backup only): {rel_path}")
+                log_print(MsgType.SUCCESS, f"Restored (from backup only): {rel_path}")
         except Exception as e:
-            print_error(f"Failed to restore {rel_path}: {e}")
+            log_print(MsgType.ERROR, f"Failed to restore {rel_path}: {e}")
             all_ok = False
 
     for rel_path in CREATED_FILES:
@@ -272,17 +274,17 @@ def restore_backups(root_dir, state_path):
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                print_success(f"Removed generated file: {rel_path}")
+                log_print(MsgType.SUCCESS, f"Removed generated file: {rel_path}")
             except Exception as e:
-                print_error(f"Failed to remove {rel_path}: {e}")
+                log_print(MsgType.ERROR, f"Failed to remove {rel_path}: {e}")
                 all_ok = False
 
     if os.path.exists(state_path):
         try:
             os.remove(state_path)
-            print_success(f"Removed state file: {STATE_FILE_NAME}")
+            log_print(MsgType.SUCCESS, f"Removed state file: {STATE_FILE_NAME}")
         except Exception as e:
-            print_error(f"Failed to remove state file: {e}")
+            log_print(MsgType.ERROR, f"Failed to remove state file: {e}")
 
     return all_ok
 
@@ -302,27 +304,27 @@ def apply_modifications(root_dir, MODIFICATIONS):
 
         # ── create_file ops ──────────────────────────────────────────────────
         if any(op.get("type") == "create_file" for op in mod["operations"]):
-            print_info(f"Step {step} (Creating: {file_path}):")
+            log_print(MsgType.INFO, f"Step {step} (Creating: {file_path}):")
             for op in mod["operations"]:
                 if op["type"] != "create_file":
                     continue
-                print_operation(f"Operation: {op['description']}")
+                log_print(MsgType.OPERATION, f"Operation: {op['description']}")
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
                 if os.path.exists(file_path):
-                    print_warning(f"File already exists: {file_path}")
+                    log_print(MsgType.WARNING, f"File already exists: {file_path}")
                     choice = input("   Do you want to overwrite it? (y/n): ").strip().lower()
                     if not (choice == 'y' or choice == 'yes'):
-                        print_operation("Skipping file creation.")
+                        log_print(MsgType.OPERATION, "Skipping file creation.")
                         continue
                     bk = file_path + ".backup"
                     try:
                         os.replace(file_path, bk)
                         backup_path_ref[0] = bk
-                        print_operation(f"Backup created at: {bk}")
+                        log_print(MsgType.OPERATION, f"Backup created at: {bk}")
                     except Exception as e:
-                        print_error(f"Failed to create backup: {e}")
-                        print_operation("Skipping file creation.")
+                        log_print(MsgType.ERROR, f"Failed to create backup: {e}")
+                        log_print(MsgType.OPERATION, "Skipping file creation.")
                         continue
 
                 try:
@@ -331,14 +333,14 @@ def apply_modifications(root_dir, MODIFICATIONS):
                         content = "\n".join(content)
                     with open(file_path, "w") as f:
                         f.write(content)
-                    print_success(f"File created: {file_path}")
+                    log_print(MsgType.SUCCESS, f"File created: {file_path}")
                 except Exception as e:
-                    print_error(f"Failed to write file: {e}")
+                    log_print(MsgType.ERROR, f"Failed to write file: {e}")
             continue
 
         # ── modification ops ─────────────────────────────────────────────────
         if not os.path.exists(file_path):
-            print_error(f"File not found: {file_path}")
+            log_print(MsgType.ERROR, f"File not found: {file_path}")
             continue
 
         local_backup = file_path + ".backup"
@@ -349,7 +351,7 @@ def apply_modifications(root_dir, MODIFICATIONS):
             if os.path.exists(local_backup):
                 if not quiz_override:
                     quiz_override = True
-                    print_warning("Backup of origin file already exists")
+                    log_print(MsgType.WARNING, "Backup of origin file already exists")
                     ans = input("   Do you want to overwrite it? (y/n): ").strip().lower()
                     override_backup = (ans == 'y' or ans == 'yes')
                 create_backup = override_backup
@@ -360,14 +362,14 @@ def apply_modifications(root_dir, MODIFICATIONS):
                         content = f0.read()
                     with open(local_backup, "w") as f1:
                         f1.write(content)
-                    print_success(f"Backup created: {local_backup}")
+                    log_print(MsgType.SUCCESS, f"Backup created: {local_backup}")
                 except Exception as e:
-                    print_error(f"Failed to create backup: {e}")
+                    log_print(MsgType.ERROR, f"Failed to create backup: {e}")
                     if not_modify_on_error:
-                        print_operation("Skipping file modification.")
+                        log_print(MsgType.OPERATION, "Skipping file modification.")
                         continue
 
-        print_info(f"Step {step} (Processing: {file_path}):")
+        log_print(MsgType.INFO, f"Step {step} (Processing: {file_path}):")
 
         with open(file_path, "r") as f:
             lines = f.readlines()
@@ -376,7 +378,7 @@ def apply_modifications(root_dir, MODIFICATIONS):
         for op in mod["operations"]:
             op_type     = op["type"]
             description = op.get("description", "")
-            print_operation(f"Operation: {description}. (Type: {op_type})")
+            log_print(MsgType.OPERATION, f"Operation: {description}. (Type: {op_type})")
 
             if op_type == "replace_line":
                 find    = op["find"].strip()
@@ -385,11 +387,11 @@ def apply_modifications(root_dir, MODIFICATIONS):
                 for i in range(len(lines)):
                     if lines[i].strip() == find:
                         lines[i] = replace
-                        print_success(f"Line replaced at line {i+1}")
+                        log_print(MsgType.SUCCESS, f"Line replaced at line {i+1}")
                         found = modified = True
                         break
                 if not found:
-                    print_error(f"Target line not found: {find}")
+                    log_print(MsgType.ERROR, f"Target line not found: {find}")
 
             elif op_type == "replace_block":
                 find_lines    = [ln.strip() for ln in op["find"]]
@@ -398,11 +400,11 @@ def apply_modifications(root_dir, MODIFICATIONS):
                 for i in range(len(lines) - len(find_lines) + 1):
                     if all(lines[i + j].strip() == find_lines[j] for j in range(len(find_lines))):
                         lines[i:i + len(find_lines)] = replace_lines
-                        print_success(f"Block replaced starting at line {i+1}")
+                        log_print(MsgType.SUCCESS, f"Block replaced starting at line {i+1}")
                         modified = block_found = True
                         break
                 if not block_found:
-                    print_error("Target block not found")
+                    log_print(MsgType.ERROR, "Target block not found")
 
             elif op_type == "insert_after":
                 find          = op["find"].strip()
@@ -420,14 +422,14 @@ def apply_modifications(root_dir, MODIFICATIONS):
                         )
                         if not already:
                             lines[i+1:i+1] = replace_lines
-                            print_success(f"Inserted after line {i+1}")
+                            log_print(MsgType.SUCCESS, f"Inserted after line {i+1}")
                             modified = True
                         else:
-                            print_success("Content already present, skipping insertion")
+                            log_print(MsgType.SUCCESS, "Content already present, skipping insertion")
                         found = True
                         break
                 if not found:
-                    print_error(f"Insertion point not found: {find}")
+                    log_print(MsgType.ERROR, f"Insertion point not found: {find}")
 
             elif op_type == "append":
                 replace_lines   = [ln + "\n" for ln in op["replace"]]
@@ -437,17 +439,17 @@ def apply_modifications(root_dir, MODIFICATIONS):
                 )
                 if not already_present:
                     lines.extend(replace_lines)
-                    print_success("Appended to end of file")
+                    log_print(MsgType.SUCCESS, "Appended to end of file")
                     modified = True
                 else:
-                    print_success("Content already present at end, skipping append")
+                    log_print(MsgType.SUCCESS, "Content already present at end, skipping append")
 
         if modified:
             with open(file_path, "w") as f:
                 f.writelines(lines)
-            print_success(f"File updated: {file_path}")
+            log_print(MsgType.SUCCESS, f"File updated: {file_path}")
         else:
-            print_warning(f"No changes made to file (Step {step})")
+            log_print(MsgType.WARNING, f"No changes made to file (Step {step})")
 
     return backup_path_ref[0]
 
@@ -884,14 +886,14 @@ if menu_choice == "1":
 
     log = save_log(f"\n=== Applying Enhanced {algorithm_name} Encryption For Godot ===")
     print(f"\n\n{LogColors.HEADER}{log}{LogColors.ENDC}")
-    print_info(f"Generated PACK_HEADER_MAGIC      : {baseHeader}  // Tag: \"{baseTag}\"")
-    print_info(f"Generated ENCRYPTED_HEADER_MAGIC : {encHeader}  // Tag: \"{encTag}\"")
-    print_info(f"Security Token: {token_hex}")
+    log_print(MsgType.INFO, f"Generated PACK_HEADER_MAGIC      : {baseHeader}  // Tag: \"{baseTag}\"")
+    log_print(MsgType.INFO, f"Generated ENCRYPTED_HEADER_MAGIC : {encHeader}  // Tag: \"{encTag}\"")
+    log_print(MsgType.INFO, f"Security Token: {token_hex}")
 
     backup_path = apply_modifications(godot_root, MODIFICATIONS)
 
     write_state_file(state_file_path, algorithm_name, detected_version_str, token_hex)
-    print_success(f"State file written: {state_file_path}")
+    log_print(MsgType.SUCCESS, f"State file written: {state_file_path}")
     save_log(f"State file written at {state_file_path}")
 
     print(f"\n{LogColors.HEADER}=== Operation Complete ==={LogColors.ENDC}")
@@ -901,18 +903,18 @@ if menu_choice == "1":
     print(f"{LogColors.BOLD}  Security Token:{LogColors.ENDC}  {token_hex}")
     print(f"{LogColors.BOLD}  Encryption Key:{LogColors.ENDC}  {encKey}")
     print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
-    print_warning(
+    log_print(MsgType.WARNING, 
         "The Security Token is embedded in the compiled engine binary. "
         f"Enter the {LogColors.FAIL}Encryption Key{LogColors.WARNING} in Godot's export preset — "
         "not the Security Token."
     )
-    print_warning("Store both values in secure storage — they are required to re-export or rebuild.")
-    print_success(f"{LogColors.OKGREEN} Build is now Cryptographically Unique{LogColors.ENDC}")
+    log_print(MsgType.WARNING, "Store both values in secure storage — they are required to re-export or rebuild.")
+    log_print(MsgType.SUCCESS, f"{LogColors.OKGREEN} Build is now Cryptographically Unique{LogColors.ENDC}")
     save_log(f"\nSecurity Token: {token_hex}\nEncryption Key: {encKey}")
     save_log("\n[WARN] - Use Encryption Key during export. Store both values securely.")
     if backup_path:
         save_log(f"\n[INFO] - Old Key Backup Created at: {backup_path}")
-        print_info(f"{LogColors.OKGREEN} Old Key Backup Created at: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
+        log_print(MsgType.INFO, f"{LogColors.OKGREEN} Old Key Backup Created at: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MODE 2 — Refresh security token
@@ -958,13 +960,13 @@ elif menu_choice == "2":
         save_log(f"    Enter Custom Security Token: {token_hex}")
     token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
 
-    print_info(f"Refreshing security_token.h with new token: {token_hex}")
+    log_print(MsgType.INFO, f"Refreshing security_token.h with new token: {token_hex}")
     try:
         path = write_security_token_header(godot_root, token_hex, token_c_array)
-        print_success(f"security_token.h refreshed: {path}")
+        log_print(MsgType.SUCCESS, f"security_token.h refreshed: {path}")
         save_log(f"\nNew Security Token: {token_hex}")
     except Exception as e:
-        print_error(f"Failed to refresh security_token.h: {e}")
+        log_print(MsgType.ERROR, f"Failed to refresh security_token.h: {e}")
         try:
             input("\nPress Enter key to exit...")
         except EOFError:
@@ -972,7 +974,7 @@ elif menu_choice == "2":
         sys.exit(1)
 
     write_state_file(state_file_path, prev_algorithm, prev_version, token_hex)
-    print_success(f"State file updated: {state_file_path}")
+    log_print(MsgType.SUCCESS, f"State file updated: {state_file_path}")
     save_log(f"State file updated at {state_file_path}")
 
     print(f"\n{LogColors.HEADER}=== Token Refresh Complete ==={LogColors.ENDC}")
@@ -982,8 +984,8 @@ elif menu_choice == "2":
     print(f"{LogColors.BOLD}  New Security Token:{LogColors.ENDC}  {token_hex}")
     print(f"{LogColors.BOLD}  Encryption Key:    {LogColors.ENDC}  {encKey}")
     print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
-    print_warning("Rebuild Godot and re-export your project with the Encryption Key to apply the new token.")
-    print_warning("Store both values in secure storage — they are required to re-export or rebuild.")
+    log_print(MsgType.WARNING, "Rebuild Godot and re-export your project with the Encryption Key to apply the new token.")
+    log_print(MsgType.WARNING, "Store both values in secure storage — they are required to re-export or rebuild.")
     save_log(f"\nNew Security Token: {token_hex}\nEncryption Key: {encKey}")
     save_log("\n[WARN] - Rebuild Godot and re-export with the Encryption Key to apply the new token.")
 
@@ -1026,9 +1028,9 @@ elif menu_choice == "3":
 
     print(f"\n{LogColors.HEADER}=== Restore {'Complete' if ok else 'Finished With Warnings'} (View Logs For Info) ==={LogColors.ENDC}\n")
     if ok:
-        print_success("All files restored. Godot source is back to its original state.")
+        log_print(MsgType.SUCCESS, "All files restored. Godot source is back to its original state.")
     else:
-        print_warning("Some files could not be restored. Check the log for details.")
+        log_print(MsgType.WARNING, "Some files could not be restored. Check the log for details.")
 
 # ── Unknown choice ─────────────────────────────────────────────────────────────
 else:
