@@ -119,6 +119,86 @@ def init_log(suffix):
     with open(logFileName, "w", encoding="utf-8") as lf:
         lf.write(f"Created On - {current_dt}\nGodot-Secure log — SAVE IT.\n\n")
 
+# ── Encryption key resolution ──────────────────────────────────────────────────
+
+def _apply_key(key, godot_root, source):
+    """Set the env var, write godot.gdkey, echo the key, and log the outcome."""
+    os.environ["SCRIPT_AES256_ENCRYPTION_KEY"] = key
+    print(f"\n{LogColors.BOLD} Encryption Key:{LogColors.ENDC} {key}\n")
+    key_file = os.path.join(godot_root, "godot.gdkey")
+    try:
+        with open(key_file, "w", encoding="utf-8") as kf:
+            kf.write(key)
+        print_success(f"Key written to: {key_file}")
+        print_warning(
+            f"Store this key and {LogColors.BOLD}godot.gdkey{LogColors.ENDC}{LogColors.WARNING} in "
+            "secure storage — they must never be committed to version control."
+        )
+        save_log(f"Encryption Key ({source}): {key}")
+        save_log(f"Key written to: {key_file}")
+    except Exception as e:
+        print_error(f"Could not write godot.gdkey ({e}). Key is set for this session only.")
+        save_log(f"Encryption Key ({source}): {key}")
+        save_log(f"Could not write godot.gdkey: {e}")
+    return key
+
+
+def _abort_no_key():
+    save_log("No valid encryption key provided. Cannot proceed.")
+    print(f"\n{LogColors.FAIL}Operation cannot proceed without a valid SCRIPT_AES256_ENCRYPTION_KEY.{LogColors.ENDC}")
+    try:
+        input("\nPress Enter key to exit...")
+    except EOFError:
+        pass
+    sys.exit(1)
+
+
+def resolve_encryption_key(godot_root):
+    """Return the value of SCRIPT_AES256_ENCRYPTION_KEY.
+
+    If the variable is absent or not a valid 64-character hex string, the user
+    is offered two options:
+      - Supply their own 64-character hex key (assigned to the env var)
+      - Have the script generate a cryptographically secure key
+    Declining both exits the script.
+    """
+    raw = os.environ.get("SCRIPT_AES256_ENCRYPTION_KEY", "")
+    is_valid = len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw)
+
+    if is_valid:
+        return raw
+
+    if raw:
+        print_warning(
+            "SCRIPT_AES256_ENCRYPTION_KEY is set but is not a valid 256-bit hex key "
+            f"(expected 64 hex characters, got {len(raw)})."
+        )
+    else:
+        print_warning("SCRIPT_AES256_ENCRYPTION_KEY has not been configured.")
+
+    print(f"\n  How would you like to provide an encryption key?\n")
+    print(f"    [1] Enter my own 64-character hex key")
+    print(f"    [2] Generate a secure key automatically")
+    print(f"    [3] Cancel")
+    choice = input(f"\n  {LogColors.FAIL}Enter choice [1/2/3]:{LogColors.ENDC} ").strip()
+    save_log(f"\n[INFO] - Encryption key resolution choice: {choice}")
+
+    if choice == "1":
+        while True:
+            value = input("    Enter your 64-character hex key: ").strip()
+            if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+                save_log("User supplied a custom encryption key.")
+                return _apply_key(value, godot_root, "user-supplied")
+            print_error("Invalid key — must be exactly 64 hexadecimal characters. Please try again.")
+
+    elif choice == "2":
+        new_key = secrets.token_hex(32)  # 32 bytes = 64 hex chars = 256 bits
+        save_log("Script generated a new encryption key.")
+        return _apply_key(new_key, godot_root, "generated")
+
+    else:
+        _abort_no_key()
+
 # ── State file ─────────────────────────────────────────────────────────────────
 
 STATE_FILE_NAME = ".godot_secure"
@@ -535,10 +615,7 @@ if menu_choice == "1":
     save_log(f"Menu choice: [1] Apply")
     save_log(f"Choose Encryption Algorithm [1/2]?: {algo_choice} -> {algorithm_name}")
 
-    try:
-        encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
-    except Exception:
-        encKey = "Can't Fetch Your Environment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
+    encKey = resolve_encryption_key(godot_root)
 
     # ── Generate random initial values ────────────────────────────────────────
     baseTag        = generate_random_tag()
@@ -821,15 +898,17 @@ if menu_choice == "1":
     save_log(f"State file written at {state_file_path}")
 
     print(f"\n{LogColors.HEADER}=== Operation Complete (View Logs For Info) ==={LogColors.ENDC}\n")
-    print(f"{LogColors.BOLD} Security Token:{LogColors.ENDC} {token_hex}\n")
-    print(f"{LogColors.WARNING} Encryption Key: {LogColors.FAIL}{encKey}{LogColors.ENDC}")
+    print(f"{LogColors.BOLD} Security Token: {LogColors.ENDC}{token_hex}")
+    print(f"{LogColors.BOLD} Encryption Key: {LogColors.ENDC}{encKey}\n")
     print_warning(
-        f"{LogColors.WARNING} Security Token and Encryption Key are different. "
-        f"Use {LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} During Export!{LogColors.ENDC}"
+        "The Security Token is embedded in the compiled engine binary. "
+        f"The Encryption Key is what you enter in Godot's export preset — use "
+        f"{LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} during export, not the Security Token."
     )
+    print_warning("Store both values in secure storage — they are required to re-export or rebuild.")
     print_success(f"{LogColors.OKGREEN} Build is now Cryptographically Unique{LogColors.ENDC}")
     save_log(f"\nSecurity Token: {token_hex}\nEncryption Key: {encKey}")
-    save_log("\n[WARN] - Security Token and Encryption Key are different. Use Encryption Key During Export!")
+    save_log("\n[WARN] - Use Encryption Key during export. Store both values securely.")
     if backup_path:
         save_log(f"\n[INFO] - Old Key Backup Created at: {backup_path}")
         print_info(f"{LogColors.OKGREEN} Old Key Backup Created at: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
@@ -864,10 +943,7 @@ elif menu_choice == "2":
     print(f"    Last applied: {prev_applied}")
     print(f"    Prev token  : {prev_token}")
 
-    try:
-        encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
-    except Exception:
-        encKey = "Can't Fetch Your Environment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
+    encKey = resolve_encryption_key(godot_root)
 
     # Generate default new token then let user override
     security_token = generate_random_token()
@@ -899,13 +975,11 @@ elif menu_choice == "2":
     save_log(f"State file updated at {state_file_path}")
 
     print(f"\n{LogColors.HEADER}=== Token Refresh Complete (View Logs For Info) ==={LogColors.ENDC}\n")
-    print(f"{LogColors.BOLD} New Security Token:{LogColors.ENDC} {token_hex}\n")
-    print(f"{LogColors.WARNING} Encryption Key: {LogColors.FAIL}{encKey}{LogColors.ENDC}")
-    print_warning(
-        f"{LogColors.WARNING} Rebuild Godot and re-export your project with "
-        f"{LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} to apply the new token.{LogColors.ENDC}"
-    )
-    save_log(f"\nEncryption Key: {encKey}")
+    print(f"{LogColors.BOLD} New Security Token: {LogColors.ENDC}{token_hex}")
+    print(f"{LogColors.BOLD} Encryption Key:     {LogColors.ENDC}{encKey}\n")
+    print_warning("Rebuild Godot and re-export your project with the Encryption Key to apply the new token.")
+    print_warning("Store both values in secure storage — they are required to re-export or rebuild.")
+    save_log(f"\nNew Security Token: {token_hex}\nEncryption Key: {encKey}")
     save_log("\n[WARN] - Rebuild Godot and re-export with the Encryption Key to apply the new token.")
 
 # ══════════════════════════════════════════════════════════════════════════════

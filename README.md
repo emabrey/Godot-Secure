@@ -22,6 +22,7 @@ After patching you compile Godot from source exactly as you normally would.
 - Python 3.8 or later
 - The Godot Engine **C++ source tree** (not an exported project — the source you would compile yourself)
 - Godot 4.x source is supported; the script auto-detects whether the source is 4.6+ or an older 4.x branch and selects the correct code paths
+- Build tools for compiling Godot (SCons, a C++ compiler); see the [official Godot build documentation](https://docs.godotengine.org/en/stable/contributing/development/compiling/index.html)
 
 ---
 
@@ -119,23 +120,34 @@ If a `.backup` file is missing for any non-Camellia file, the script warns you b
 
 Once the script has finished applying Godot Secure, you must compile both the **editor** and all **export templates** from source. The compiled editor binary and every export template must be built from the same patched source tree — mixing a patched build with stock templates (or vice versa) will cause encryption mismatches at runtime.
 
-### 1 — Generate an encryption key
+### 1 — Set your encryption key
 
-Godot's export encryption expects a 256-bit hex key in the `SCRIPT_AES256_ENCRYPTION_KEY` environment variable. Generate one with OpenSSL and set it before compiling:
+Godot's export encryption expects a 256-bit hex key in the `SCRIPT_AES256_ENCRYPTION_KEY` environment variable. The script checks this variable when you run option [1] or [2]. If it is not set, or is not a valid 64-character hex string, you will be prompted:
 
-```bash
-# Generate a 256-bit key and save it somewhere safe
-openssl rand -hex 32 > godot.gdkey
 ```
+  How would you like to provide an encryption key?
+
+    [1] Enter my own 64-character hex key
+    [2] Generate a secure key automatically
+    [3] Cancel
+```
+
+Choosing **[1]** lets you paste in an existing key — useful when you already have a key from a previous build and want to keep using it.
+
+Choosing **[2]** generates a cryptographically secure 256-bit key using Python's `secrets` module, writes it to `godot.gdkey` in the Godot source root, and sets `SCRIPT_AES256_ENCRYPTION_KEY` for the remainder of the process.
+
+Choosing **[3]** (or pressing Enter without a valid choice) exits the script — the operation cannot proceed without a key.
+
+If you prefer to set the variable yourself before running the script:
 
 ```bash
 # Linux / macOS
-export SCRIPT_AES256_ENCRYPTION_KEY=$(cat godot.gdkey)
+export SCRIPT_AES256_ENCRYPTION_KEY=<your-64-char-hex-key>
 ```
 
 ```powershell
 # Windows (PowerShell)
-$env:SCRIPT_AES256_ENCRYPTION_KEY = Get-Content godot.gdkey
+$env:SCRIPT_AES256_ENCRYPTION_KEY = "<your-64-char-hex-key>"
 ```
 
 > **Keep this key.** You must use the same value every time you export your project. If you lose it, your exported projects cannot be decrypted.
@@ -192,14 +204,15 @@ For full details on compiling Godot from source, see the [official Godot build d
 
 ## Protecting sensitive files
 
-Godot Secure produces two files that **must never be committed** to your Godot source repository:
+Godot Secure produces three categories of files that **must never be committed** to your Godot source repository:
 
 | File | What it contains |
 |------|-----------------|
-| `.godot_secure` | The algorithm, security token, and timestamp of your Godot Secure build |
 | `godot.gdkey` | Your 256-bit encryption key |
+| `.godot_secure` | The algorithm, security token, and timestamp of your Godot Secure build |
+| `godot_secure_*.log` | Full record of every token, header magic value, and key derivation formula generated for each run |
 
-If either file is pushed to a public (or compromised private) repository, an attacker can reconstruct the exact key derivation used by your engine build and decrypt your exported game assets. Treat them with the same care as a private key or a database password.
+If any of these files is pushed to a public (or compromised private) repository, an attacker can reconstruct the exact key derivation used by your engine build and decrypt your exported game assets. Treat them with the same care as a private key or a database password.
 
 ### Add them to your Godot source .gitignore
 
@@ -209,8 +222,6 @@ Open (or create) `.gitignore` in the root of your Godot source tree and add the 
 # Godot Secure — never commit these
 .godot_secure
 godot.gdkey
-
-# Godot Secure log files
 godot_secure_*.log
 ```
 
@@ -235,6 +246,8 @@ These files are the only way to re-export your project or reproduce your engine 
 - **Backed up** — losing them means you cannot re-export or re-build; existing exported projects will be permanently unloadable by any new engine binary
 - **Access-controlled** — a password manager, an encrypted vault (e.g. VeraCrypt or Bitwarden), or a secrets manager appropriate for your team size
 - **Separate from the source repository** — do not keep them in any folder that is part of a git working tree, even a private one
+
+The log files in particular are easy to overlook because they are written next to the script rather than inside the Godot source tree. Make a habit of moving each log file to secure storage immediately after reviewing it.
 
 If you are working in a team, share these files through a dedicated secrets management system rather than through version control.
 
