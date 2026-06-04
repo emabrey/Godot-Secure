@@ -1,5 +1,7 @@
 # Godot-Secure .gitignore config file
 .godot_secure
+godot.gdkey
+godot_secure_*.log
 
 # Folders:
 .vscode/
