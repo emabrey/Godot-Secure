@@ -6,9 +6,125 @@ import string
 import binascii
 import secrets
 import datetime
+import argparse
 from enum import Enum, auto
 
+# ── CLI argument parsing ───────────────────────────────────────────────────────
+
+def build_arg_parser():
+    p = argparse.ArgumentParser(
+        prog="godot_secure.py",
+        description="Patch Godot Engine source with cryptographically unique encryption.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modes
+-----
+  apply    Patch a clean Godot source tree (default when no --mode given).
+  refresh  Rotate the security token on an already-patched source tree.
+  restore  Revert all patches and remove generated files.
+
+Examples
+--------
+  # Interactive (default)
+  python godot_secure.py /path/to/godot
+
+  # Fully non-interactive CI run with AES-256 and a pre-existing key
+  python godot_secure.py /path/to/godot \\
+      --mode apply --algorithm aes --generate-key \\
+      --advanced-kdf --non-interactive
+
+  # Refresh token, supplying the key via env var
+  python godot_secure.py /path/to/godot --mode refresh --non-interactive
+
+  # Restore original source files
+  python godot_secure.py /path/to/godot --mode restore --non-interactive
+"""
+    )
+
+    p.add_argument(
+        "godot_root",
+        nargs="?",
+        default=None,
+        metavar="GODOT_SOURCE_ROOT",
+        help="Path to the Godot source root (default: current directory).",
+    )
+
+    # ── Mode ──────────────────────────────────────────────────────────────────
+    p.add_argument(
+        "--mode",
+        choices=["apply", "refresh", "restore"],
+        default=None,
+        help="Operation to perform. Replaces the interactive main menu.",
+    )
+
+    # ── Apply options ─────────────────────────────────────────────────────────
+    apply_group = p.add_argument_group("Apply options (--mode apply)")
+    apply_group.add_argument(
+        "--algorithm",
+        choices=["aes", "camellia"],
+        default=None,
+        help="Encryption algorithm. Default: aes.",
+    )
+    apply_group.add_argument(
+        "--base-tag",
+        metavar="TAG",
+        default=None,
+        help="4-character ASCII magic header tag for pack files.",
+    )
+    apply_group.add_argument(
+        "--enc-tag",
+        metavar="TAG",
+        default=None,
+        help="4-character ASCII magic header tag for encrypted files.",
+    )
+    apply_group.add_argument(
+        "--advanced-kdf",
+        action="store_true",
+        default=False,
+        help="Generate a randomized multi-layer key derivation formula.",
+    )
+
+    # ── Key options (apply + refresh) ─────────────────────────────────────────
+    key_group = p.add_argument_group("Encryption key options (apply / refresh)")
+    key_mutex = key_group.add_mutually_exclusive_group()
+    key_mutex.add_argument(
+        "--key",
+        metavar="HEX",
+        default=None,
+        help="64-character hex encryption key. Sets SCRIPT_AES256_ENCRYPTION_KEY.",
+    )
+    key_mutex.add_argument(
+        "--generate-key",
+        action="store_true",
+        default=False,
+        help="Generate a new 256-bit encryption key automatically.",
+    )
+
+    # ── Token option (apply + refresh) ────────────────────────────────────────
+    p.add_argument(
+        "--token",
+        metavar="HEX",
+        default=None,
+        help="64-character hex security token (apply / refresh modes).",
+    )
+
+    # ── Behaviour flags ───────────────────────────────────────────────────────
+    p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip all confirmation prompts and 'Press Enter' pauses. "
+            "All missing values fall back to their defaults. "
+            "Required when running in a CI environment."
+        ),
+    )
+
+    return p
+
+
 # ── Generation helpers ─────────────────────────────────────────────────────────
+
 def generate_random_tag(length=4):
     return ''.join(random.choices(string.ascii_uppercase, k=length))
 
@@ -69,6 +185,7 @@ def build_random_key_derivation():
     return f"token_key.write[i] = (uint8_t)({expression});"
 
 # ── Logging ────────────────────────────────────────────────────────────────────
+
 class LogColors:
     HEADER    = '\033[95m'
     OKBLUE    = '\033[94m'
@@ -78,7 +195,7 @@ class LogColors:
     ENDC      = '\033[0m'
     BOLD      = '\033[1m'
     UNDERLINE = '\033[4m'
-   
+
 logFileName = None  # set before first log_print call
 
 def save_log(message):
@@ -114,16 +231,35 @@ def init_log(suffix):
     with open(logFileName, "w", encoding="utf-8") as lf:
         lf.write(f"Created On - {current_dt}\nGodot-Secure log — SAVE IT.\n\n")
 
+# ── Interactive / non-interactive input helper ─────────────────────────────────
+
+def prompt(question: str, default: str = "", non_interactive: bool = False) -> str:
+    """Return user input, or `default` when running non-interactively."""
+    if non_interactive:
+        save_log(f"{question} [non-interactive, using default: {default!r}]")
+        return default
+    return input(question).strip()
+
+def pause_exit(non_interactive: bool = False):
+    """Wait for Enter before exiting, unless running non-interactively."""
+    if non_interactive:
+        return
+    try:
+        input("\nPress Enter key to exit...")
+    except EOFError:
+        pass
+
 # ── Encryption key resolution ──────────────────────────────────────────────────
+
 def _apply_key(key, godot_root, source):
-    """Set the env var, write godot.gdkey, echo the key, and log the outcome."""
+    """Set the env var, write godot.gdkey, and log the outcome."""
     os.environ["SCRIPT_AES256_ENCRYPTION_KEY"] = key
     key_file = os.path.join(godot_root, "godot.gdkey")
     try:
         with open(key_file, "w", encoding="utf-8") as kf:
             kf.write(key)
         log_print(MsgType.SUCCESS, f"Key written to: {key_file}")
-        log_print(MsgType.WARNING, 
+        log_print(MsgType.WARNING,
             f"Store this key and {LogColors.BOLD}godot.gdkey{LogColors.ENDC}{LogColors.WARNING} in "
             "secure storage — they must never be committed to version control."
         )
@@ -135,37 +271,57 @@ def _apply_key(key, godot_root, source):
         save_log(f"Could not write godot.gdkey: {e}")
     return key
 
-def _abort_no_key():
+def _abort_no_key(non_interactive: bool):
     save_log("No valid encryption key provided. Cannot proceed.")
     print(f"\n{LogColors.FAIL}Operation cannot proceed without a valid SCRIPT_AES256_ENCRYPTION_KEY.{LogColors.ENDC}")
-    try:
-        input("\nPress Enter key to exit...")
-    except EOFError:
-        pass
+    pause_exit(non_interactive)
     sys.exit(1)
 
-def resolve_encryption_key(godot_root):
+def resolve_encryption_key(godot_root, args):
     """Return the value of SCRIPT_AES256_ENCRYPTION_KEY.
 
-    If the variable is absent or not a valid 64-character hex string, the user
-    is offered two options:
-      - Supply their own 64-character hex key (assigned to the env var)
-      - Have the script generate a cryptographically secure key
-    Declining both exits the script.
+    Resolution order:
+      1. --key CLI argument
+      2. --generate-key CLI flag
+      3. SCRIPT_AES256_ENCRYPTION_KEY environment variable (if valid)
+      4. Interactive prompt (skipped / aborted when --non-interactive)
     """
-    raw = os.environ.get("SCRIPT_AES256_ENCRYPTION_KEY", "")
-    is_valid = len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw)
+    ni = args.non_interactive
 
-    if is_valid:
+    # 1. Explicit --key value
+    if args.key:
+        if len(args.key) == 64 and all(c in "0123456789abcdefABCDEF" for c in args.key):
+            save_log("Encryption key provided via --key argument.")
+            return _apply_key(args.key, godot_root, "cli --key")
+        else:
+            print(f"{LogColors.FAIL}Error: --key value is not a valid 64-character hex string.{LogColors.ENDC}")
+            pause_exit(ni)
+            sys.exit(1)
+
+    # 2. --generate-key flag
+    if args.generate_key:
+        new_key = secrets.token_hex(32)
+        save_log("Encryption key generated via --generate-key flag.")
+        return _apply_key(new_key, godot_root, "cli --generate-key")
+
+    # 3. Environment variable
+    raw = os.environ.get("SCRIPT_AES256_ENCRYPTION_KEY", "")
+    if len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw):
         return raw
 
     if raw:
-        log_print(MsgType.WARNING, 
+        log_print(MsgType.WARNING,
             "SCRIPT_AES256_ENCRYPTION_KEY is set but is not a valid 256-bit hex key "
             f"(expected 64 hex characters, got {len(raw)})."
         )
     else:
         log_print(MsgType.WARNING, "SCRIPT_AES256_ENCRYPTION_KEY has not been configured.")
+
+    # 4. Interactive prompt
+    if ni:
+        print(f"{LogColors.FAIL}Error: no encryption key available. "
+              f"Set SCRIPT_AES256_ENCRYPTION_KEY or pass --key / --generate-key.{LogColors.ENDC}")
+        sys.exit(1)
 
     print(f"\n  How would you like to provide an encryption key?\n")
     print(f"    [1] Enter my own 64-character hex key")
@@ -181,16 +337,15 @@ def resolve_encryption_key(godot_root):
                 save_log("User supplied a custom encryption key.")
                 return _apply_key(value, godot_root, "user-supplied")
             log_print(MsgType.ERROR, "Invalid key — must be exactly 64 hexadecimal characters. Please try again.")
-
     elif choice == "2":
-        new_key = secrets.token_hex(32)  # 32 bytes = 64 hex chars = 256 bits
+        new_key = secrets.token_hex(32)
         save_log("Script generated a new encryption key.")
         return _apply_key(new_key, godot_root, "generated")
-
     else:
-        _abort_no_key()
+        _abort_no_key(ni)
 
 # ── State file ─────────────────────────────────────────────────────────────────
+
 STATE_FILE_NAME = ".godot_secure"
 
 def write_state_file(state_path, algorithm, godot_version, token):
@@ -207,19 +362,15 @@ def read_state_file(state_path):
     with open(state_path, encoding="utf-8") as sf:
         return json.load(sf)
 
-# ── File lists for backup restoration  ────────────────────────────────────
+# ── File lists for backup restoration ─────────────────────────────────────────
 
-# All files that may have .backup copies after a Godot Secure run.
-# security_token.h is created (not modified), so it is deleted on restore rather
-# than swapped from a backup.
 RESTORE_FILES = [
     "version.py",
     "editor/export/project_export.cpp",
     "core/io/file_access_pack.h",
     "core/io/file_access_encrypted.h",
     "core/io/file_access_encrypted.cpp",
-    # Camellia-only — silently skipped when no backup exists
-    "core/crypto/crypto_core.h",
+    "core/crypto/crypto_core.h",   # Camellia-only — silently skipped when no backup
     "core/crypto/crypto_core.cpp",
 ]
 
@@ -233,21 +384,19 @@ CREATED_FILES = [
 ]
 
 # ── Restore ────────────────────────────────────────────────────────────────────
+
 def restore_backups(root_dir, state_path):
     log_print(MsgType.INFO, "Restoring original Godot source files from backups...")
-
     all_ok = True
 
     for rel_path in RESTORE_FILES:
         file_path   = os.path.join(root_dir, rel_path)
         backup_path = file_path + ".backup"
-
         if not os.path.exists(backup_path):
             if rel_path not in CAMELLIA_ONLY_FILES:
                 log_print(MsgType.WARNING, f"Backup not found, skipping: {rel_path}")
                 all_ok = False
             continue
-
         try:
             if os.path.exists(file_path):
                 os.replace(backup_path, file_path)
@@ -280,12 +429,12 @@ def restore_backups(root_dir, state_path):
 
 # ── apply_modifications engine ─────────────────────────────────────────────────
 
-def apply_modifications(root_dir, MODIFICATIONS):
-    quiz_override      = False
-    override_backup    = True
+def apply_modifications(root_dir, MODIFICATIONS, non_interactive=False):
+    quiz_override       = False
+    override_backup     = True
     not_modify_on_error = True
-    track_backup_file  = set()
-    backup_path_ref    = [None]
+    track_backup_file   = set()
+    backup_path_ref     = [None]
 
     step = 0
     for mod in MODIFICATIONS:
@@ -303,8 +452,8 @@ def apply_modifications(root_dir, MODIFICATIONS):
 
                 if os.path.exists(file_path):
                     log_print(MsgType.WARNING, f"File already exists: {file_path}")
-                    choice = input("   Do you want to overwrite it? (y/n): ").strip().lower()
-                    if not (choice == 'y' or choice == 'yes'):
+                    choice = prompt("   Do you want to overwrite it? (y/n): ", "y", non_interactive).lower()
+                    if choice not in ('y', 'yes'):
                         log_print(MsgType.OPERATION, "Skipping file creation.")
                         continue
                     bk = file_path + ".backup"
@@ -337,15 +486,13 @@ def apply_modifications(root_dir, MODIFICATIONS):
         if local_backup not in track_backup_file:
             track_backup_file.add(local_backup)
             create_backup = True
-
             if os.path.exists(local_backup):
                 if not quiz_override:
                     quiz_override = True
                     log_print(MsgType.WARNING, "Backup of origin file already exists")
-                    ans = input("   Do you want to overwrite it? (y/n): ").strip().lower()
-                    override_backup = (ans == 'y' or ans == 'yes')
+                    ans = prompt("   Do you want to overwrite it? (y/n): ", "y", non_interactive).lower()
+                    override_backup = ans in ('y', 'yes')
                 create_backup = override_backup
-
             if create_backup:
                 try:
                     with open(file_path, 'r') as f0:
@@ -360,7 +507,6 @@ def apply_modifications(root_dir, MODIFICATIONS):
                         continue
 
         log_print(MsgType.INFO, f"Step {step} (Processing: {file_path}):")
-
         with open(file_path, "r") as f:
             lines = f.readlines()
 
@@ -371,9 +517,9 @@ def apply_modifications(root_dir, MODIFICATIONS):
             log_print(MsgType.OPERATION, f"Operation: {description}. (Type: {op_type})")
 
             if op_type == "replace_line":
-                find    = op["find"].strip()
+                find  = op["find"].strip()
                 replace = op["replace"] + "\n"
-                found   = False
+                found = False
                 for i in range(len(lines)):
                     if lines[i].strip() == find:
                         lines[i] = replace
@@ -443,7 +589,7 @@ def apply_modifications(root_dir, MODIFICATIONS):
 
     return backup_path_ref[0]
 
-# ── Token header writer (shared by apply and refresh) ─────────────────────────
+# ── Token header writer ────────────────────────────────────────────────────────
 
 def write_security_token_header(root_dir, token_hex, token_c_array):
     path = os.path.join(root_dir, "core", "crypto", "security_token.h")
@@ -464,31 +610,52 @@ def write_security_token_header(root_dir, token_hex, token_c_array):
         f.write(content)
     return path
 
-# ── Shared token prompts ───────────────────────────────────────────────────────
+# ── Shared token + KDF prompts ─────────────────────────────────────────────────
 
-def prompt_token_options(default_token_hex, default_security_token):
-    """Ask the user about custom token and advanced key derivation.
-    Returns (token_hex, security_token, token_c_array, key_derivation_algorithm)."""
-    token_hex          = default_token_hex
-    security_token     = default_security_token
-    key_deriv          = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
+def resolve_token_and_kdf(default_token_hex, default_security_token, args):
+    """Resolve security token and key derivation algorithm.
 
-    confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
-    save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
-    if confirm in ('y', 'yes'):
-        token_hex      = str(input("    Enter Custom Security Token: ")).lower()
-        security_token = bytes.fromhex(token_hex)
-        save_log(f"    Enter Custom Security Token: {token_hex}")
+    CLI options (--token, --advanced-kdf) take precedence over interactive prompts.
+    Returns (token_hex, security_token, token_c_array, key_derivation_algorithm).
+    """
+    ni        = args.non_interactive
+    token_hex = default_token_hex
+    sec_token = default_security_token
+    key_deriv = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
 
-    token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
+    # Token
+    if args.token:
+        token_hex = args.token.lower()
+        sec_token = bytes.fromhex(token_hex)
+        save_log(f"Security token provided via --token argument: {token_hex}")
+    else:
+        ans = prompt(
+            f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
+            "n", ni
+        ).lower()
+        save_log(f"\n[INFO] - Use Custom Token (y/n)?: {ans}")
+        if ans in ('y', 'yes'):
+            token_hex = str(input("    Enter Custom Security Token: ")).lower()
+            sec_token = bytes.fromhex(token_hex)
+            save_log(f"    Enter Custom Security Token: {token_hex}")
 
-    confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Advanced Key Derivation {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
-    save_log(f"\n[INFO] - Use Advanced Key Derivation (y/n)?: {confirm}")
-    if confirm in ('y', 'yes'):
+    token_c_array = ', '.join([f'0x{b:02X}' for b in sec_token])
+
+    # Key derivation
+    if args.advanced_kdf:
         key_deriv = build_random_key_derivation()
-        save_log(f"    Generated Advanced Key Derivation Algorithm:\n            {key_deriv}")
+        save_log(f"Advanced KDF enabled via --advanced-kdf flag:\n            {key_deriv}")
+    else:
+        ans = prompt(
+            f"\n\n ℹ  {LogColors.OKBLUE}Use Advanced Key Derivation {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
+            "n", ni
+        ).lower()
+        save_log(f"\n[INFO] - Use Advanced Key Derivation (y/n)?: {ans}")
+        if ans in ('y', 'yes'):
+            key_deriv = build_random_key_derivation()
+            save_log(f"    Generated Advanced Key Derivation Algorithm:\n            {key_deriv}")
 
-    return token_hex, security_token, token_c_array, key_deriv
+    return token_hex, sec_token, token_c_array, key_deriv
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Entry point
@@ -496,36 +663,29 @@ def prompt_token_options(default_token_hex, default_security_token):
 
 current_dt = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
 
+args = build_arg_parser().parse_args()
+ni   = args.non_interactive  # shorthand used throughout
+
 # ── Resolve Godot source root ──────────────────────────────────────────────────
-if len(sys.argv) == 1:
+if args.godot_root:
+    godot_root = args.godot_root
+else:
     godot_root = os.getcwd()
     print("\nNo directory specified. Using current directory as Godot Source Root.")
-elif len(sys.argv) == 2:
-    godot_root = sys.argv[1]
-else:
-    print("\nUsage: python godot_secure.py <godot_source_root>")
-    try:
-        input("\nPress Enter key to exit...")
-    except EOFError:
-        pass
-    sys.exit(1)
 
 # ── Validate Godot source ──────────────────────────────────────────────────────
-core_dir       = os.path.join(godot_root, "core")
+core_dir        = os.path.join(godot_root, "core")
 sconstruct_file = os.path.join(godot_root, "SConstruct")
 
 if not (os.path.isdir(core_dir) and os.path.isfile(sconstruct_file)):
     print(f"{LogColors.FAIL}Error: No valid Godot Source Detected in the Specified Directory.{LogColors.ENDC}")
-    try:
-        input("\nPress Enter key to exit...")
-    except EOFError:
-        pass
+    pause_exit(ni)
     sys.exit(1)
 
 # ── Detect Godot version ───────────────────────────────────────────────────────
-godot_minor        = 0
+godot_minor          = 0
 detected_version_str = "unknown"
-version_py_path    = os.path.join(godot_root, "version.py")
+version_py_path      = os.path.join(godot_root, "version.py")
 
 if os.path.isfile(version_py_path):
     version_vars = {}
@@ -542,7 +702,6 @@ if os.path.isfile(version_py_path):
 else:
     print(f"{LogColors.WARNING}Warning: version.py not found. Assuming v4.5.x code paths.{LogColors.ENDC}")
 
-# .ptr() on 4.6+, .ptrw() on older versions
 compress_ptr = "compressed.ptr()" if godot_minor >= 6 else "compressed.ptrw()"
 
 # ── Read state file (may not exist) ───────────────────────────────────────────
@@ -556,10 +715,10 @@ if os.path.isfile(state_file_path):
 
 already_applied = state is not None
 
-# ── Main menu ──────────────────────────────────────────────────────────────────
-print(f"\n{LogColors.HEADER}{'═' * 54}")
+# ── Main menu (or --mode bypass) ───────────────────────────────────────────────
+print(f"\n{LogColors.HEADER}{'=' * 54}")
 print(f"  Godot Secure")
-print(f"{'═' * 54}{LogColors.ENDC}")
+print(f"{'=' * 54}{LogColors.ENDC}")
 print(f"\n  Source root      : {godot_root}")
 print(f"  Godot version    : {detected_version_str}")
 if already_applied:
@@ -569,30 +728,37 @@ if already_applied:
 else:
     print(f"  Status           : {LogColors.OKGREEN}Clean Godot source{LogColors.ENDC}")
 
-print(f"\n  What would you like to do?\n")
-
-opt1_note = f" {LogColors.WARNING}(already applied — will re-apply){LogColors.ENDC}" if already_applied else ""
-opt2_note = f" {LogColors.FAIL}(requires prior application){LogColors.ENDC}"         if not already_applied else ""
-opt3_note = f" {LogColors.FAIL}(requires prior application){LogColors.ENDC}"         if not already_applied else ""
-
-print(f"    [1] Apply Godot Secure to this source tree{opt1_note}")
-print(f"    [2] Refresh security token{opt2_note}")
-print(f"    [3] Restore original Godot source{opt3_note}")
-print()
-
-menu_choice = input(f"  {LogColors.FAIL}Enter choice [1/2/3]:{LogColors.ENDC} ").strip()
+if args.mode:
+    # Map CLI mode name to menu choice string
+    menu_choice = {"apply": "1", "refresh": "2", "restore": "3"}[args.mode]
+    print(f"\n  Mode selected via --mode: {args.mode}")
+else:
+    print(f"\n  What would you like to do?\n")
+    opt1_note = f" {LogColors.WARNING}(already applied — will re-apply){LogColors.ENDC}" if already_applied else ""
+    opt2_note = f" {LogColors.FAIL}(requires prior application){LogColors.ENDC}"         if not already_applied else ""
+    opt3_note = f" {LogColors.FAIL}(requires prior application){LogColors.ENDC}"         if not already_applied else ""
+    print(f"    [1] Apply Godot Secure to this source tree{opt1_note}")
+    print(f"    [2] Refresh security token{opt2_note}")
+    print(f"    [3] Restore original Godot source{opt3_note}")
+    print()
+    menu_choice = prompt(f"  {LogColors.FAIL}Enter choice [1/2/3]:{LogColors.ENDC} ", "", ni)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MODE 1 — Apply Godot Secure (full first-run flow)
+# MODE 1 — Apply Godot Secure
 # ══════════════════════════════════════════════════════════════════════════════
 if menu_choice == "1":
 
-    # ── Algorithm selection ────────────────────────────────────────────────────
-    print(f"\n\n ℹ  {LogColors.OKBLUE}Choose Encryption Algorithm:{LogColors.ENDC}")
-    print(f"     [1] AES-256  (default)")
-    print(f"     [2] Camellia-256")
-    algo_choice   = input(f"     {LogColors.FAIL}Enter choice [1/2]:{LogColors.ENDC} ").strip()
-    use_aes       = algo_choice != "2"
+    # Algorithm
+    if args.algorithm:
+        use_aes = args.algorithm == "aes"
+        save_log(f"Algorithm provided via --algorithm: {args.algorithm}")
+    else:
+        print(f"\n\n ℹ  {LogColors.OKBLUE}Choose Encryption Algorithm:{LogColors.ENDC}")
+        print(f"     [1] AES-256  (default)")
+        print(f"     [2] Camellia-256")
+        algo_choice = prompt(f"     {LogColors.FAIL}Enter choice [1/2]:{LogColors.ENDC} ", "1", ni)
+        use_aes = algo_choice != "2"
+
     algorithm_name = "AES-256" if use_aes else "Camellia-256"
     ctx_class      = "CryptoCore::AESContext" if use_aes else "CryptoCore::CamelliaContext"
     export_title   = f"Export With Godot Secure ({algorithm_name})"
@@ -601,12 +767,11 @@ if menu_choice == "1":
     save_log(f"\nUsing Godot Source Root: {godot_root}")
     save_log(f"Detected Godot Version : {detected_version_str} (minor={godot_minor}, compress_ptr={compress_ptr})")
     save_log(f"Algorithm: {algorithm_name}")
-    save_log(f"Menu choice: [1] Apply")
-    save_log(f"Choose Encryption Algorithm [1/2]?: {algo_choice} -> {algorithm_name}")
+    save_log(f"Mode: apply | non-interactive: {ni}")
 
-    encKey = resolve_encryption_key(godot_root)
+    encKey = resolve_encryption_key(godot_root, args)
 
-    # ── Generate random initial values ────────────────────────────────────────
+    # Random initial values
     baseTag        = generate_random_tag()
     encTag         = generate_random_tag()
     security_token = generate_random_token()
@@ -614,159 +779,103 @@ if menu_choice == "1":
     baseHeader     = generate_magic_header(baseTag)
     encHeader      = generate_magic_header(encTag)
 
-    # ── Custom headers ─────────────────────────────────────────────────────────
-    confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Headers {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
-    save_log(f"\n[INFO] - Use Custom Headers (y/n)?: {confirm}")
-    if confirm in ('y', 'yes'):
-        baseTag    = input("    Enter Custom Magic Header (e.g. GDPC): ").upper()
-        baseHeader = generate_magic_header(baseTag)
-        encTag     = input("    Enter Custom Encrypted Magic Header (e.g. GDEC): ").upper()
-        encHeader  = generate_magic_header(encTag)
-        save_log(f"    Enter Custom Magic Header: {baseTag}\n    Enter Custom Encrypted Magic Header: {encTag}")
+    # Custom headers
+    if args.base_tag or args.enc_tag:
+        if args.base_tag:
+            baseTag    = args.base_tag.upper()
+            baseHeader = generate_magic_header(baseTag)
+            save_log(f"Pack header tag provided via --base-tag: {baseTag}")
+        if args.enc_tag:
+            encTag    = args.enc_tag.upper()
+            encHeader = generate_magic_header(encTag)
+            save_log(f"Encrypted header tag provided via --enc-tag: {encTag}")
+    else:
+        ans = prompt(
+            f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Headers {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
+            "n", ni
+        ).lower()
+        save_log(f"\n[INFO] - Use Custom Headers (y/n)?: {ans}")
+        if ans in ('y', 'yes'):
+            baseTag    = input("    Enter Custom Magic Header (e.g. GDPC): ").upper()
+            baseHeader = generate_magic_header(baseTag)
+            encTag     = input("    Enter Custom Encrypted Magic Header (e.g. GDEC): ").upper()
+            encHeader  = generate_magic_header(encTag)
+            save_log(f"    Enter Custom Magic Header: {baseTag}\n    Enter Custom Encrypted Magic Header: {encTag}")
 
-    # ── Token + key derivation ─────────────────────────────────────────────────
-    token_hex, security_token, token_c_array, key_derivation_algorithm = prompt_token_options(token_hex, security_token)
+    # Token + key derivation
+    token_hex, security_token, token_c_array, key_derivation_algorithm = \
+        resolve_token_and_kdf(token_hex, security_token, args)
 
-    # ── Build MODIFICATIONS ────────────────────────────────────────────────────
+    # Build MODIFICATIONS
     MODIFICATIONS = [
         {
             "file": "version.py",
-            "operations": [{
-                "type": "replace_line",
-                "description": "Modify Godot title to add Godot Secure",
-                "find":    "name = \"Godot Engine\"",
-                "replace": "name = \"Godot Engine (With Godot Secure)\""
-            }]
+            "operations": [{"type": "replace_line", "description": "Modify Godot title to add Godot Secure",
+                "find": "name = \"Godot Engine\"", "replace": "name = \"Godot Engine (With Godot Secure)\""}]
         },
         {
             "file": "editor/export/project_export.cpp",
-            "operations": [{
-                "type": "replace_line",
-                "description": "Modify Godot export popup title to add Godot Secure",
-                "find":    "set_title(TTR(\"Export\"));",
-                "replace": f"set_title(TTR(\"{export_title}\"));"
-            }]
+            "operations": [{"type": "replace_line", "description": "Modify Godot export popup title",
+                "find": "set_title(TTR(\"Export\"));", "replace": f"set_title(TTR(\"{export_title}\"));"}]
         },
         {
             "file": "core/crypto/security_token.h",
-            "operations": [{
-                "type": "create_file",
-                "description": "Create security token header",
+            "operations": [{"type": "create_file", "description": "Create security token header",
                 "content": [
-                    "#ifndef SECURITY_TOKEN_H",
-                    "#define SECURITY_TOKEN_H",
-                    "",
-                    "#include \"core/typedefs.h\"",
-                    "",
-                    "namespace Security {",
+                    "#ifndef SECURITY_TOKEN_H", "#define SECURITY_TOKEN_H", "",
+                    "#include \"core/typedefs.h\"", "", "namespace Security {",
                     f"    //Security Token: {token_hex}",
                     f"    static const uint8_t TOKEN[32] = {{ {token_c_array} }};",
-                    "};",
-                    "",
-                    "#endif // SECURITY_TOKEN_H"
-                ]
-            }]
+                    "};", "", "#endif // SECURITY_TOKEN_H"
+                ]}]
         },
         {
             "file": "core/io/file_access_pack.h",
-            "operations": [{
-                "type": "replace_line",
-                "description": "Modify Packed File Header Magic",
-                "find":    "#define PACK_HEADER_MAGIC 0x43504447",
-                "replace": f"#define PACK_HEADER_MAGIC {baseHeader}  // Generated Tag: \"{baseTag}\""
-            }]
+            "operations": [{"type": "replace_line", "description": "Modify Packed File Header Magic",
+                "find": "#define PACK_HEADER_MAGIC 0x43504447",
+                "replace": f"#define PACK_HEADER_MAGIC {baseHeader}  // Generated Tag: \"{baseTag}\""}]
         },
         {
             "file": "core/io/file_access_encrypted.h",
-            "operations": [{
-                "type": "replace_line",
-                "description": "Modify Encrypted File Header Magic",
-                "find":    "#define ENCRYPTED_HEADER_MAGIC 0x43454447",
-                "replace": f"#define ENCRYPTED_HEADER_MAGIC {encHeader}  // Generated Tag: \"{encTag}\""
-            }]
+            "operations": [{"type": "replace_line", "description": "Modify Encrypted File Header Magic",
+                "find": "#define ENCRYPTED_HEADER_MAGIC 0x43454447",
+                "replace": f"#define ENCRYPTED_HEADER_MAGIC {encHeader}  // Generated Tag: \"{encTag}\""}]
         },
         {
             "file": "core/io/file_access_encrypted.cpp",
             "operations": [
-                {
-                    "type": "insert_after",
-                    "description": "Include security token header",
-                    "find":    "#include \"file_access_encrypted.h\"",
-                    "replace": "#include \"core/crypto/security_token.h\""
-                },
-                {
-                    "type": "replace_block",
-                    "description": "Add token obfuscation for decryption",
-                    "find": [
-                        "{",
-                        "CryptoCore::AESContext ctx;",
-                        "",
+                {"type": "insert_after", "description": "Include security token header",
+                    "find": "#include \"file_access_encrypted.h\"",
+                    "replace": "#include \"core/crypto/security_token.h\""},
+                {"type": "replace_block", "description": "Add token obfuscation for decryption",
+                    "find": ["{", "CryptoCore::AESContext ctx;", "",
                         "ctx.set_encode_key(key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!",
-                        "ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());",
-                        "}"
-                    ],
-                    "replace": [
-                        "{",
-                        f"{ctx_class} ctx;",
-                        "",
-                        "    // Apply security token to key",
-                        "    Vector<uint8_t> token_key;",
-                        "    token_key.resize(32);",
-                        "    const uint8_t *key_ptr = key.ptr();",
-                        "    for (int i = 0; i < 32; i++) {",
-                        f"        {key_derivation_algorithm}",
-                        "    }",
-                        "",
-                        "    ctx.set_encode_key(token_key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!",
-                        "    ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());",
-                        "}"
-                    ]
-                }
+                        "ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());", "}"],
+                    "replace": ["{", f"{ctx_class} ctx;", "",
+                        "    // Apply security token to key", "    Vector<uint8_t> token_key;",
+                        "    token_key.resize(32);", "    const uint8_t *key_ptr = key.ptr();",
+                        "    for (int i = 0; i < 32; i++) {", f"        {key_derivation_algorithm}", "    }",
+                        "", "    ctx.set_encode_key(token_key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!",
+                        "    ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());", "}"]}
             ]
         },
         {
             "file": "core/io/file_access_encrypted.cpp",
-            "operations": [{
-                "type": "replace_block",
-                "description": "Add token obfuscation for encryption",
-                "find": [
-                    "CryptoCore::AESContext ctx;",
-                    "ctx.set_encode_key(key.ptrw(), 256);",
-                    "",
-                    "if (use_magic) {",
-                    "    file->store_32(ENCRYPTED_HEADER_MAGIC);",
-                    "}",
-                    "",
-                    "file->store_buffer(hash, 16);",
-                    "file->store_64(data.size());",
-                    "file->store_buffer(iv.ptr(), 16);",
-                    "",
-                    f"ctx.encrypt_cfb(len, iv.ptrw(), {compress_ptr}, {compress_ptr});"
-                ],
-                "replace": [
-                    f"{ctx_class} ctx;",
-                    "",
-                    "    // Apply security token to key",
-                    "    Vector<uint8_t> token_key;",
-                    "    token_key.resize(32);",
-                    "    const uint8_t *key_ptr = key.ptr();",
-                    "    for (int i = 0; i < 32; i++) {",
-                    f"        {key_derivation_algorithm}",
-                    "    }",
-                    "",
-                    "    ctx.set_encode_key(token_key.ptrw(), 256);",
-                    "",
-                    "if (use_magic) {",
-                    "file->store_32(ENCRYPTED_HEADER_MAGIC);",
-                    "}",
-                    "",
-                    "file->store_buffer(hash, 16);",
-                    "file->store_64(data.size());",
-                    "file->store_buffer(iv.ptr(), 16);",
-                    "",
-                    f"ctx.encrypt_cfb(len, iv.ptrw(), {compress_ptr}, {compress_ptr});"
-                ]
-            }]
+            "operations": [{"type": "replace_block", "description": "Add token obfuscation for encryption",
+                "find": ["CryptoCore::AESContext ctx;", "ctx.set_encode_key(key.ptrw(), 256);", "",
+                    "if (use_magic) {", "    file->store_32(ENCRYPTED_HEADER_MAGIC);", "}",
+                    "", "file->store_buffer(hash, 16);", "file->store_64(data.size());",
+                    "file->store_buffer(iv.ptr(), 16);", "",
+                    f"ctx.encrypt_cfb(len, iv.ptrw(), {compress_ptr}, {compress_ptr});"],
+                "replace": [f"{ctx_class} ctx;", "",
+                    "    // Apply security token to key", "    Vector<uint8_t> token_key;",
+                    "    token_key.resize(32);", "    const uint8_t *key_ptr = key.ptr();",
+                    "    for (int i = 0; i < 32; i++) {", f"        {key_derivation_algorithm}", "    }",
+                    "", "    ctx.set_encode_key(token_key.ptrw(), 256);",
+                    "", "if (use_magic) {", "file->store_32(ENCRYPTED_HEADER_MAGIC);", "}",
+                    "", "file->store_buffer(hash, 16);", "file->store_64(data.size());",
+                    "file->store_buffer(iv.ptr(), 16);", "",
+                    f"ctx.encrypt_cfb(len, iv.ptrw(), {compress_ptr}, {compress_ptr});"]}]
         },
     ]
 
@@ -774,20 +883,11 @@ if menu_choice == "1":
         MODIFICATIONS += [
             {
                 "file": "core/crypto/crypto_core.h",
-                "operations": [{
-                    "type": "insert_after",
-                    "description": "Add CamelliaContext class declaration",
+                "operations": [{"type": "insert_after", "description": "Add CamelliaContext class declaration",
                     "find": "};",
                     "replace": [
-                        "// Camellia-256 (via Mbed TLS)",
-                        "class CamelliaContext {",
-                        "private:",
-                        "    void *ctx = nullptr;",
-                        "",
-                        "public:",
-                        "    CamelliaContext();",
-                        "    ~CamelliaContext();",
-                        "",
+                        "// Camellia-256 (via Mbed TLS)", "class CamelliaContext {", "private:",
+                        "    void *ctx = nullptr;", "", "public:", "    CamelliaContext();", "    ~CamelliaContext();", "",
                         "    Error set_encode_key(const uint8_t *p_key, size_t p_bits);",
                         "    Error set_decode_key(const uint8_t *p_key, size_t p_bits);",
                         "    Error encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
@@ -796,80 +896,51 @@ if menu_choice == "1":
                         "    Error decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
                         "    Error encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
                         "    Error decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
-                        "};",
-                        ""
-                    ]
-                }]
+                        "};", ""
+                    ]}]
             },
             {
                 "file": "core/crypto/crypto_core.cpp",
                 "operations": [
-                    {
-                        "type": "insert_after",
-                        "description": "Add Camellia include",
-                        "find":    "#include <mbedtls/aes.h>",
-                        "replace": "#include <mbedtls/camellia.h>"
-                    },
-                    {
-                        "type": "append",
-                        "description": "Add Camellia implementation",
+                    {"type": "insert_after", "description": "Add Camellia include",
+                        "find": "#include <mbedtls/aes.h>", "replace": "#include <mbedtls/camellia.h>"},
+                    {"type": "append", "description": "Add Camellia implementation",
                         "replace": [
                             "// ----------------------------------------------------------------",
-                            "// Camellia-256 implementation",
-                            "",
+                            "// Camellia-256 implementation", "",
                             "CryptoCore::CamelliaContext::CamelliaContext() {",
                             "    ctx = memalloc(sizeof(mbedtls_camellia_context));",
-                            "    mbedtls_camellia_init((mbedtls_camellia_context *)ctx);",
-                            "}",
-                            "",
+                            "    mbedtls_camellia_init((mbedtls_camellia_context *)ctx);", "}", "",
                             "CryptoCore::CamelliaContext::~CamelliaContext() {",
                             "    mbedtls_camellia_free((mbedtls_camellia_context *)ctx);",
-                            "    memfree(ctx);",
-                            "}",
-                            "",
+                            "    memfree(ctx);", "}", "",
                             "Error CryptoCore::CamelliaContext::set_encode_key(const uint8_t *p_key, size_t p_bits) {",
                             "    int ret = mbedtls_camellia_setkey_enc((mbedtls_camellia_context *)ctx, p_key, p_bits);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::set_decode_key(const uint8_t *p_key, size_t p_bits) {",
                             "    int ret = mbedtls_camellia_setkey_dec((mbedtls_camellia_context *)ctx, p_key, p_bits);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
                             "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_src, r_dst);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
                             "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_src, r_dst);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
                             "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, r_iv, p_src, r_dst);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
                             "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, r_iv, p_src, r_dst);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
                             "    size_t iv_off = 0;",
                             "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
-                            "    return ret ? FAILED : OK;",
-                            "}",
-                            "",
+                            "    return ret ? FAILED : OK;", "}", "",
                             "Error CryptoCore::CamelliaContext::decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
                             "    size_t iv_off = 0;",
                             "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
-                            "    return ret ? FAILED : OK;",
-                            "}"
-                        ]
-                    }
+                            "    return ret ? FAILED : OK;", "}"
+                        ]}
                 ]
             },
         ]
@@ -880,7 +951,7 @@ if menu_choice == "1":
     log_print(MsgType.INFO, f"Generated ENCRYPTED_HEADER_MAGIC : {encHeader}  // Tag: \"{encTag}\"")
     log_print(MsgType.INFO, f"Security Token: {token_hex}")
 
-    backup_path = apply_modifications(godot_root, MODIFICATIONS)
+    backup_path = apply_modifications(godot_root, MODIFICATIONS, ni)
 
     write_state_file(state_file_path, algorithm_name, detected_version_str, token_hex)
     log_print(MsgType.SUCCESS, f"State file written: {state_file_path}")
@@ -893,7 +964,7 @@ if menu_choice == "1":
     print(f"{LogColors.BOLD}  Security Token:{LogColors.ENDC}  {token_hex}")
     print(f"{LogColors.BOLD}  Encryption Key:{LogColors.ENDC}  {encKey}")
     print(f"\n{LogColors.HEADER}{'─' * 54}{LogColors.ENDC}\n")
-    log_print(MsgType.WARNING, 
+    log_print(MsgType.WARNING,
         "The Security Token is embedded in the compiled engine binary. "
         f"Enter the {LogColors.FAIL}Encryption Key{LogColors.WARNING} in Godot's export preset — "
         "not the Security Token."
@@ -904,7 +975,7 @@ if menu_choice == "1":
     save_log("\n[WARN] - Use Encryption Key during export. Store both values securely.")
     if backup_path:
         save_log(f"\n[INFO] - Old Key Backup Created at: {backup_path}")
-        log_print(MsgType.INFO, f"{LogColors.OKGREEN} Old Key Backup Created at: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
+        log_print(MsgType.INFO, f"{LogColors.OKGREEN} Old Key Backup: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MODE 2 — Refresh security token
@@ -914,10 +985,7 @@ elif menu_choice == "2":
     if not already_applied:
         print(f"\n{LogColors.FAIL}Error: Godot Secure has not been applied to this source tree yet.{LogColors.ENDC}")
         print("Run option [1] first.")
-        try:
-            input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
+        pause_exit(ni)
         sys.exit(1)
 
     prev_algorithm = state.get("algorithm", "AES-256")
@@ -928,7 +996,7 @@ elif menu_choice == "2":
 
     init_log("Refresh-AES" if use_aes_prev else "Refresh-Camellia")
     save_log(f"Refresh mode. Previous: algorithm={prev_algorithm}, version={prev_version}, applied_at={prev_applied}")
-    save_log(f"Menu choice: [2] Refresh token")
+    save_log(f"Mode: refresh | non-interactive: {ni}")
 
     print(f"\n  Previous run details:")
     print(f"    Algorithm   : {prev_algorithm}")
@@ -936,18 +1004,27 @@ elif menu_choice == "2":
     print(f"    Last applied: {prev_applied}")
     print(f"    Prev token  : {prev_token}")
 
-    encKey = resolve_encryption_key(godot_root)
+    encKey = resolve_encryption_key(godot_root, args)
 
-    # Generate default new token then let user override
+    # New token
     security_token = generate_random_token()
     token_hex      = binascii.hexlify(security_token).decode('utf-8')
 
-    confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
-    save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
-    if confirm in ('y', 'yes'):
-        token_hex      = str(input("    Enter Custom Security Token: ")).lower()
+    if args.token:
+        token_hex      = args.token.lower()
         security_token = bytes.fromhex(token_hex)
-        save_log(f"    Enter Custom Security Token: {token_hex}")
+        save_log(f"Security token provided via --token argument: {token_hex}")
+    else:
+        ans = prompt(
+            f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
+            "n", ni
+        ).lower()
+        save_log(f"\n[INFO] - Use Custom Token (y/n)?: {ans}")
+        if ans in ('y', 'yes'):
+            token_hex      = str(input("    Enter Custom Security Token: ")).lower()
+            security_token = bytes.fromhex(token_hex)
+            save_log(f"    Enter Custom Security Token: {token_hex}")
+
     token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
 
     log_print(MsgType.INFO, f"Refreshing security_token.h with new token: {token_hex}")
@@ -957,10 +1034,7 @@ elif menu_choice == "2":
         save_log(f"\nNew Security Token: {token_hex}")
     except Exception as e:
         log_print(MsgType.ERROR, f"Failed to refresh security_token.h: {e}")
-        try:
-            input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
+        pause_exit(ni)
         sys.exit(1)
 
     write_state_file(state_file_path, prev_algorithm, prev_version, token_hex)
@@ -987,10 +1061,7 @@ elif menu_choice == "3":
     if not already_applied:
         print(f"\n{LogColors.FAIL}Error: Godot Secure has not been applied to this source tree yet.{LogColors.ENDC}")
         print("Nothing to restore.")
-        try:
-            input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
+        pause_exit(ni)
         sys.exit(1)
 
     prev_algorithm = state.get("algorithm", "AES-256")
@@ -998,25 +1069,25 @@ elif menu_choice == "3":
 
     init_log("Restore")
     save_log(f"Restore mode. Previous: algorithm={prev_algorithm}, applied_at={prev_applied}")
-    save_log(f"Menu choice: [3] Restore")
+    save_log(f"Mode: restore | non-interactive: {ni}")
 
     print(f"\n  This will restore original Godot source files from .backup copies")
     print(f"  and remove the generated security_token.h.")
     print(f"  Previous application: {prev_algorithm} on {prev_applied}\n")
 
-    confirm = input(f" ⚠   {LogColors.WARNING}Restore original Godot source {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+    confirm = prompt(
+        f" ⚠   {LogColors.WARNING}Restore original Godot source {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
+        "y", ni
+    ).lower()
     save_log(f"Restore original Godot source (y/n)?: {confirm}")
-    if not (confirm in ('y', 'yes')):
+    if confirm not in ('y', 'yes'):
         print(save_log("Closing Setup..."))
-        try:
-            input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
+        pause_exit(ni)
         sys.exit(1)
 
     ok = restore_backups(godot_root, state_file_path)
 
-    print(f"\n{LogColors.HEADER}=== Restore {'Complete' if ok else 'Finished With Warnings'} (View Logs For Info) ==={LogColors.ENDC}\n")
+    print(f"\n{LogColors.HEADER}=== Restore {'Complete' if ok else 'Finished With Warnings'} ==={LogColors.ENDC}\n")
     if ok:
         log_print(MsgType.SUCCESS, "All files restored. Godot source is back to its original state.")
     else:
@@ -1025,15 +1096,9 @@ elif menu_choice == "3":
 # ── Unknown choice ─────────────────────────────────────────────────────────────
 else:
     print(f"\n{LogColors.FAIL}Invalid choice. Exiting.{LogColors.ENDC}")
-    try:
-        input("\nPress Enter key to exit...")
-    except EOFError:
-        pass
+    pause_exit(ni)
     sys.exit(1)
 
 # ── Done ───────────────────────────────────────────────────────────────────────
-try:
-    input("\nPress Enter key to exit...")
-except EOFError:
-    pass
+pause_exit(ni)
 sys.exit(0)
