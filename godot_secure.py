@@ -61,7 +61,7 @@ Examples
     apply_group = p.add_argument_group("Apply options (--mode apply)")
     apply_group.add_argument(
         "--algorithm",
-        choices=["aes", "camellia"],
+        choices=["aes", "camellia", "aria"],
         default=None,
         help="Encryption algorithm. Default: aes.",
     )
@@ -374,7 +374,7 @@ RESTORE_FILES = [
     "core/crypto/crypto_core.cpp",
 ]
 
-CAMELLIA_ONLY_FILES = {
+CIPHER_EXTRA_FILES = {
     "core/crypto/crypto_core.h",
     "core/crypto/crypto_core.cpp",
 }
@@ -393,7 +393,7 @@ def restore_backups(root_dir, state_path):
         file_path   = os.path.join(root_dir, rel_path)
         backup_path = file_path + ".backup"
         if not os.path.exists(backup_path):
-            if rel_path not in CAMELLIA_ONLY_FILES:
+            if rel_path not in CIPHER_EXTRA_FILES:
                 log_print(MsgType.WARNING, f"Backup not found, skipping: {rel_path}")
                 all_ok = False
             continue
@@ -750,20 +750,30 @@ if menu_choice == "1":
 
     # Algorithm
     if args.algorithm:
-        use_aes = args.algorithm == "aes"
+        chosen_algo = args.algorithm
         save_log(f"Algorithm provided via --algorithm: {args.algorithm}")
     else:
         print(f"\n\n ℹ  {LogColors.OKBLUE}Choose Encryption Algorithm:{LogColors.ENDC}")
         print(f"     [1] AES-256  (default)")
         print(f"     [2] Camellia-256")
-        algo_choice = prompt(f"     {LogColors.FAIL}Enter choice [1/2]:{LogColors.ENDC} ", "1", ni)
-        use_aes = algo_choice != "2"
+        print(f"     [3] ARIA-256")
+        algo_choice = prompt(f"     {LogColors.FAIL}Enter choice [1/2/3]:{LogColors.ENDC} ", "1", ni)
+        if algo_choice == "2":
+            chosen_algo = "camellia"
+        elif algo_choice == "3":
+            chosen_algo = "aria"
+        else:
+            chosen_algo = "aes"
 
-    algorithm_name = "AES-256" if use_aes else "Camellia-256"
-    ctx_class      = "CryptoCore::AESContext" if use_aes else "CryptoCore::CamelliaContext"
-    export_title   = f"Export With Godot Secure ({algorithm_name})"
+    _ALGO_META = {
+        "aes":      ("AES-256",      "CryptoCore::AESContext"),
+        "camellia": ("Camellia-256", "CryptoCore::CamelliaContext"),
+        "aria":     ("ARIA-256",     "CryptoCore::AriaContext"),
+    }
+    algorithm_name, ctx_class = _ALGO_META[chosen_algo]
+    export_title = f"Export With Godot Secure ({algorithm_name})"
 
-    init_log("AES" if use_aes else "Camellia")
+    init_log({"aes": "AES", "camellia": "Camellia", "aria": "ARIA"}[chosen_algo])
     save_log(f"\nUsing Godot Source Root: {godot_root}")
     save_log(f"Detected Godot Version : {detected_version_str} (minor={godot_minor}, compress_ptr={compress_ptr})")
     save_log(f"Algorithm: {algorithm_name}")
@@ -879,7 +889,7 @@ if menu_choice == "1":
         },
     ]
 
-    if not use_aes:
+    if chosen_algo == "camellia":
         MODIFICATIONS += [
             {
                 "file": "core/crypto/crypto_core.h",
@@ -945,6 +955,72 @@ if menu_choice == "1":
             },
         ]
 
+    elif chosen_algo == "aria":
+        MODIFICATIONS += [
+            {
+                "file": "core/crypto/crypto_core.h",
+                "operations": [{"type": "insert_after", "description": "Add AriaContext class declaration",
+                    "find": "};",
+                    "replace": [
+                        "// ARIA-256 (via Mbed TLS)", "class AriaContext {", "private:",
+                        "    void *ctx = nullptr;", "", "public:", "    AriaContext();", "    ~AriaContext();", "",
+                        "    Error set_encode_key(const uint8_t *p_key, size_t p_bits);",
+                        "    Error set_decode_key(const uint8_t *p_key, size_t p_bits);",
+                        "    Error encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
+                        "    Error decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
+                        "    Error encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "    Error decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "    Error encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "    Error decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                        "};", ""
+                    ]}]
+            },
+            {
+                "file": "core/crypto/crypto_core.cpp",
+                "operations": [
+                    {"type": "insert_after", "description": "Add ARIA include",
+                        "find": "#include <mbedtls/aes.h>", "replace": "#include <mbedtls/aria.h>"},
+                    {"type": "append", "description": "Add ARIA implementation",
+                        "replace": [
+                            "// ----------------------------------------------------------------",
+                            "// ARIA-256 implementation", "",
+                            "CryptoCore::AriaContext::AriaContext() {",
+                            "    ctx = memalloc(sizeof(mbedtls_aria_context));",
+                            "    mbedtls_aria_init((mbedtls_aria_context *)ctx);", "}", "",
+                            "CryptoCore::AriaContext::~AriaContext() {",
+                            "    mbedtls_aria_free((mbedtls_aria_context *)ctx);",
+                            "    memfree(ctx);", "}", "",
+                            "Error CryptoCore::AriaContext::set_encode_key(const uint8_t *p_key, size_t p_bits) {",
+                            "    int ret = mbedtls_aria_setkey_enc((mbedtls_aria_context *)ctx, p_key, p_bits);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::set_decode_key(const uint8_t *p_key, size_t p_bits) {",
+                            "    int ret = mbedtls_aria_setkey_dec((mbedtls_aria_context *)ctx, p_key, p_bits);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
+                            "    int ret = mbedtls_aria_crypt_ecb((mbedtls_aria_context *)ctx, p_src, r_dst);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
+                            "    int ret = mbedtls_aria_crypt_ecb((mbedtls_aria_context *)ctx, p_src, r_dst);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                            "    int ret = mbedtls_aria_crypt_cbc((mbedtls_aria_context *)ctx, MBEDTLS_ARIA_ENCRYPT, p_length, r_iv, p_src, r_dst);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                            "    int ret = mbedtls_aria_crypt_cbc((mbedtls_aria_context *)ctx, MBEDTLS_ARIA_DECRYPT, p_length, r_iv, p_src, r_dst);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                            "    size_t iv_off = 0;",
+                            "    int ret = mbedtls_aria_crypt_cfb128((mbedtls_aria_context *)ctx, MBEDTLS_ARIA_ENCRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
+                            "    return ret ? FAILED : OK;", "}", "",
+                            "Error CryptoCore::AriaContext::decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                            "    size_t iv_off = 0;",
+                            "    int ret = mbedtls_aria_crypt_cfb128((mbedtls_aria_context *)ctx, MBEDTLS_ARIA_DECRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
+                            "    return ret ? FAILED : OK;", "}"
+                        ]}
+                ]
+            },
+        ]
+
     log = save_log(f"\n=== Applying Enhanced {algorithm_name} Encryption For Godot ===")
     print(f"\n\n{LogColors.HEADER}{log}{LogColors.ENDC}")
     log_print(MsgType.INFO, f"Generated PACK_HEADER_MAGIC      : {baseHeader}  // Tag: \"{baseTag}\"")
@@ -992,9 +1068,9 @@ elif menu_choice == "2":
     prev_version   = state.get("godot_version", "unknown")
     prev_token     = state.get("token_hex", "unknown")
     prev_applied   = state.get("applied_at", "unknown")
-    use_aes_prev   = prev_algorithm != "Camellia-256"
 
-    init_log("Refresh-AES" if use_aes_prev else "Refresh-Camellia")
+    _REFRESH_LOG_SUFFIX = {"AES-256": "Refresh-AES", "Camellia-256": "Refresh-Camellia", "ARIA-256": "Refresh-ARIA"}
+    init_log(_REFRESH_LOG_SUFFIX.get(prev_algorithm, "Refresh-AES"))
     save_log(f"Refresh mode. Previous: algorithm={prev_algorithm}, version={prev_version}, applied_at={prev_applied}")
     save_log(f"Mode: refresh | non-interactive: {ni}")
 
