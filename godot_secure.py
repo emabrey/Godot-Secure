@@ -313,12 +313,26 @@ def resolve_encryption_key(godot_root, args):
             f"(expected 64 hex characters, got {len(raw)})."
         )
     else:
-        log_print(MsgType.WARNING, "SCRIPT_AES256_ENCRYPTION_KEY has not been configured.")
+        log_print(MsgType.WARNING,
+            "SCRIPT_AES256_ENCRYPTION_KEY has not been configured. "
+            "Generate a 256-bit hex key (e.g. python -c \"import secrets; print(secrets.token_hex(32))\") "
+            "and supply it via the SCRIPT_AES256_ENCRYPTION_KEY environment variable, "
+            "or store it as a GitHub Actions secret and pass it with --key."
+        )
 
     # 4. Interactive prompt
     if ni:
-        print(f"{LogColors.FAIL}Error: no encryption key available. "
-              f"Set SCRIPT_AES256_ENCRYPTION_KEY or pass --key / --generate-key.{LogColors.ENDC}")
+        print(f"\n{LogColors.FAIL}Error: no encryption key available.{LogColors.ENDC}")
+        print(f"\n  To fix this, generate a 256-bit AES key and provide it one of these ways:\n")
+        print(f"    Generate a key:")
+        print(f"      python -c \"import secrets; print(secrets.token_hex(32))\"")
+        print(f"\n    Then either:")
+        print(f"      Set the environment variable : SCRIPT_AES256_ENCRYPTION_KEY=<your-64-char-hex-key>")
+        print(f"      Pass it on the command line  : --key <your-64-char-hex-key>")
+        print(f"\n    When using GitHub Actions, store the key as an encrypted repository secret")
+        print(f"    named GODOT_ENCRYPTION_KEY and pass it to the workflow via:")
+        print(f"      env:")
+        print(f"        SCRIPT_AES256_ENCRYPTION_KEY: ${{{{ secrets.GODOT_ENCRYPTION_KEY }}}}")
         sys.exit(1)
 
     print(f"\n  How would you like to provide an encryption key?\n")
