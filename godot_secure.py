@@ -9,6 +9,15 @@ import datetime
 import argparse
 from enum import Enum, auto
 
+# ── UTF-8 stdout/stderr ────────────────────────────────────────────────────────
+# Windows uses cp1252 by default, which cannot encode the Unicode symbols used
+# in log output (ℹ, ✓, ✗, ⚠). Reconfigure both streams to UTF-8 at startup so
+# output is consistent across all platforms.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 # ── CLI argument parsing ───────────────────────────────────────────────────────
 
 def build_arg_parser():
