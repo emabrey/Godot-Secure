@@ -773,6 +773,25 @@ if menu_choice == "1":
     algorithm_name, ctx_class = _ALGO_META[chosen_algo]
     export_title = f"Export With Godot Secure ({algorithm_name})"
 
+    # Guard: if already applied with a different algorithm, refuse to continue.
+    # Mixing algorithm patches on the same source tree corrupts crypto_core.h/cpp
+    # and produces undefined behaviour at compile time.
+    if already_applied:
+        prev_algorithm = state.get("algorithm", "")
+        if prev_algorithm and prev_algorithm != algorithm_name:
+            print(f"\n{LogColors.FAIL}Error: Algorithm mismatch.{LogColors.ENDC}")
+            print(f"  This source tree was previously patched with {LogColors.BOLD}{prev_algorithm}{LogColors.ENDC}.")
+            print(f"  You selected {LogColors.BOLD}{algorithm_name}{LogColors.ENDC}.")
+            print(f"\n  Applying a different algorithm on top of an existing patch would")
+            print(f"  leave conflicting context classes in crypto_core.h/cpp and produce")
+            print(f"  undefined behaviour when Godot is compiled.")
+            print(f"\n  To switch algorithms:")
+            print(f"    1. Run option [3] to restore the original Godot source.")
+            print(f"    2. Re-run option [1] and choose {algorithm_name}.")
+            save_log(f"[ERROR] Algorithm mismatch: state={prev_algorithm}, requested={algorithm_name}. Aborting.")
+            pause_exit(ni)
+            sys.exit(1)
+
     init_log({"aes": "AES", "camellia": "Camellia", "aria": "ARIA"}[chosen_algo])
     save_log(f"\nUsing Godot Source Root: {godot_root}")
     save_log(f"Detected Godot Version : {detected_version_str} (minor={godot_minor}, compress_ptr={compress_ptr})")
@@ -1068,6 +1087,28 @@ elif menu_choice == "2":
     prev_version   = state.get("godot_version", "unknown")
     prev_token     = state.get("token_hex", "unknown")
     prev_applied   = state.get("applied_at", "unknown")
+
+    # Guard: --algorithm is an apply-only flag. If the user passes it during a
+    # refresh and it doesn't match the stored algorithm, they are probably
+    # confused about which build they are operating on. Fail fast rather than
+    # silently ignoring the flag and leaving them with an inconsistent state.
+    _ALGO_NAME_MAP = {"aes": "AES-256", "camellia": "Camellia-256", "aria": "ARIA-256"}
+    if args.algorithm:
+        requested_name = _ALGO_NAME_MAP.get(args.algorithm, args.algorithm)
+        if requested_name != prev_algorithm:
+            print(f"\n{LogColors.FAIL}Error: --algorithm {args.algorithm!r} does not match the stored algorithm.{LogColors.ENDC}")
+            print(f"  This source tree was patched with {LogColors.BOLD}{prev_algorithm}{LogColors.ENDC}.")
+            print(f"  Refresh only rotates the security token — it does not change the")
+            print(f"  encryption algorithm. Passing a mismatched --algorithm flag would")
+            print(f"  leave the source tree in an inconsistent state.")
+            print(f"\n  To switch to {requested_name}:")
+            print(f"    1. Run option [3] to restore the original Godot source.")
+            print(f"    2. Re-run option [1] and choose {requested_name}.")
+            save_log(f"[ERROR] Refresh algorithm mismatch: state={prev_algorithm}, --algorithm={args.algorithm}. Aborting.")
+            pause_exit(ni)
+            sys.exit(1)
+        log_print(MsgType.WARNING,
+            f"--algorithm {args.algorithm!r} matches the stored algorithm and is ignored during refresh.")
 
     _REFRESH_LOG_SUFFIX = {"AES-256": "Refresh-AES", "Camellia-256": "Refresh-Camellia", "ARIA-256": "Refresh-ARIA"}
     init_log(_REFRESH_LOG_SUFFIX.get(prev_algorithm, "Refresh-AES"))
