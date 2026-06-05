@@ -131,12 +131,10 @@ def generate_random_tag(length=4):
 def generate_random_token(length=32):
     return bytes([random.randint(0, 255) for _ in range(length)])
 
-def generate_magic_header(tag: str, endian='little') -> str:
+def generate_magic_header(tag: str) -> str:
     if len(tag) != 4:
         raise ValueError("Tag must be exactly 4 characters.")
-    if endian == 'little':
-        tag = tag[::-1]
-    return "0x" + ''.join(f"{ord(c):02X}" for c in tag)
+    return "0x" + ''.join(f"{ord(c):02X}" for c in reversed(tag))
 
 def build_random_key_derivation():
     operands = ["key_ptr[i]", "Security::TOKEN[i]"]
