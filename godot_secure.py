@@ -370,7 +370,7 @@ RESTORE_FILES = [
     "core/io/file_access_pack.h",
     "core/io/file_access_encrypted.h",
     "core/io/file_access_encrypted.cpp",
-    "core/crypto/crypto_core.h",   # Camellia-only — silently skipped when no backup
+    "core/crypto/crypto_core.h",   # Camellia and ARIA only — silently skipped when no backup
     "core/crypto/crypto_core.cpp",
 ]
 
