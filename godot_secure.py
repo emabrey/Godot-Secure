@@ -61,9 +61,15 @@ Examples
     # ── Mode ──────────────────────────────────────────────────────────────────
     p.add_argument(
         "--mode",
-        choices=["apply", "refresh", "restore"],
+        choices=["apply", "refresh", "restore", "generate"],
         default=None,
-        help="Operation to perform. Replaces the interactive main menu.",
+        help=(
+            "Operation to perform. Replaces the interactive main menu. "
+            "'generate' outputs base-tag, enc-tag, security-token, and kdf-formula "
+            "for use in CI setup jobs without requiring a Godot source tree. "
+            "When GITHUB_OUTPUT is set the values are written there directly; "
+            "otherwise they are printed as key=value pairs on stdout."
+        ),
     )
 
     # ── Apply options ─────────────────────────────────────────────────────────
@@ -91,6 +97,19 @@ Examples
         action="store_true",
         default=False,
         help="Generate a randomized multi-layer key derivation formula.",
+    )
+    apply_group.add_argument(
+        "--kdf-formula",
+        metavar="FORMULA",
+        default=None,
+        help=(
+            "C statement for the per-byte key derivation inside the token XOR loop. "
+            "When provided, takes precedence over --advanced-kdf and the default XOR. "
+            "Must be identical across every OS build in a distribution or PCK files "
+            "will not decrypt correctly on platforms that used a different formula. "
+            "Generate once in a setup job and pass to all build jobs. "
+            "Example: 'token_key.write[i] = (uint8_t)(key_ptr[i] ^ Security::TOKEN[i]);'"
+        ),
     )
 
     # ── Key options (apply + refresh) ─────────────────────────────────────────
@@ -663,7 +682,12 @@ def resolve_token_and_kdf(default_token_hex, default_security_token, args):
     token_c_array = ', '.join([f'0x{b:02X}' for b in sec_token])
 
     # Key derivation
-    if args.advanced_kdf:
+    # Priority: --kdf-formula > --advanced-kdf > interactive prompt > default XOR
+    kdf_formula = getattr(args, 'kdf_formula', None)
+    if kdf_formula:
+        key_deriv = kdf_formula
+        save_log(f"KDF formula provided via --kdf-formula (cross-OS build):\n            {key_deriv}")
+    elif args.advanced_kdf:
         key_deriv = build_random_key_derivation()
         save_log(f"Advanced KDF enabled via --advanced-kdf flag:\n            {key_deriv}")
     else:
@@ -686,6 +710,62 @@ current_dt = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
 
 args = build_arg_parser().parse_args()
 ni   = args.non_interactive  # shorthand used throughout
+
+# ── Generate mode: produce shared security parameters for CI setup jobs ────────
+# Does not require a Godot source tree. Generates base-tag, enc-tag,
+# security-token, and kdf-formula then writes them to GITHUB_OUTPUT (when
+# running inside GitHub Actions) or prints them as key=value pairs on stdout.
+# Typical usage:
+#   python godot_secure.py --mode generate --advanced-kdf --non-interactive
+if args.mode == "generate":
+    init_log("Generate")
+
+    base_tag       = generate_random_tag()
+    enc_tag        = generate_random_tag()
+    while enc_tag == base_tag:
+        enc_tag    = generate_random_tag()
+
+    security_token = generate_random_token()
+    token_hex      = binascii.hexlify(security_token).decode('utf-8')
+
+    if args.advanced_kdf:
+        kdf = build_random_key_derivation()
+        save_log(f"KDF formula (advanced): {kdf}")
+    else:
+        kdf = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
+        save_log("KDF formula: default XOR (pass --advanced-kdf for a randomised formula)")
+
+    save_log(f"base-tag:       {base_tag}")
+    save_log(f"enc-tag:        {enc_tag}")
+    save_log(f"security-token: {token_hex}")
+
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        # Mask the token before it can appear in any subsequent log line.
+        print(f"::add-mask::{token_hex}")
+        log_print(MsgType.INFO, f"base-tag:       {base_tag}")
+        log_print(MsgType.INFO, f"enc-tag:        {enc_tag}")
+        log_print(MsgType.INFO,  "security-token: ***")
+        log_print(MsgType.INFO, f"kdf-formula:    {kdf}")
+        with open(github_output, "a", encoding="utf-8") as fh:
+            fh.write(f"base-tag={base_tag}\n")
+            fh.write(f"enc-tag={enc_tag}\n")
+            fh.write(f"security-token={token_hex}\n")
+            # Heredoc form handles any future '=' in the formula safely.
+            fh.write(f"kdf-formula<<GSEOF\n{kdf}\nGSEOF\n")
+        log_print(MsgType.SUCCESS, "Security parameters written to GITHUB_OUTPUT.")
+    else:
+        # Local / non-CI use: print as key=value pairs on stdout.
+        print(f"base-tag={base_tag}")
+        print(f"enc-tag={enc_tag}")
+        print(f"security-token={token_hex}")
+        print(f"kdf-formula={kdf}")
+        log_print(MsgType.INFO,
+            "GITHUB_OUTPUT is not set — values printed to stdout. "
+            "Pass them to your build via --base-tag, --enc-tag, --token, and --kdf-formula.")
+
+    pause_exit(ni)
+    sys.exit(0)
 
 # ── Resolve Godot source root ──────────────────────────────────────────────────
 if args.godot_root:
@@ -751,6 +831,7 @@ else:
 
 if args.mode:
     # Map CLI mode name to menu choice string
+    # 'generate' exits early above and never reaches this point.
     menu_choice = {"apply": "1", "refresh": "2", "restore": "3"}[args.mode]
     print(f"\n  Mode selected via --mode: {args.mode}")
 else:
