@@ -741,8 +741,6 @@ if args.mode == "generate":
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
-        # Mask the token before it can appear in any subsequent log line.
-        print(f"::add-mask::{token_hex}")
         log_print(MsgType.INFO, f"base-tag:       {base_tag}")
         log_print(MsgType.INFO, f"enc-tag:        {enc_tag}")
         log_print(MsgType.INFO,  "security-token: ***")
