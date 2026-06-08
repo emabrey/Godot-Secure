@@ -65,8 +65,9 @@ Examples
         default=None,
         help=(
             "Operation to perform. Replaces the interactive main menu. "
-            "'generate' outputs base-tag, enc-tag, security-token, and kdf-formula "
+            "'generate' outputs security-token and kdf-formula "
             "for use in CI setup jobs without requiring a Godot source tree. "
+            "base-tag and enc-tag are derived from the token automatically. "
             "When GITHUB_OUTPUT is set the values are written there directly; "
             "otherwise they are printed as key=value pairs on stdout."
         ),
@@ -79,18 +80,6 @@ Examples
         choices=["aes", "camellia", "aria"],
         default=None,
         help="Encryption algorithm. Default: aes.",
-    )
-    apply_group.add_argument(
-        "--base-tag",
-        metavar="TAG",
-        default=None,
-        help="4-character ASCII magic header tag for pack files.",
-    )
-    apply_group.add_argument(
-        "--enc-tag",
-        metavar="TAG",
-        default=None,
-        help="4-character ASCII magic header tag for encrypted files.",
     )
     apply_group.add_argument(
         "--advanced-kdf",
@@ -153,11 +142,24 @@ Examples
 
 # ── Generation helpers ─────────────────────────────────────────────────────────
 
-def generate_random_tag(length=4):
-    return ''.join(random.choices(string.ascii_uppercase, k=length))
-
 def generate_random_token(length=32):
     return bytes([random.randint(0, 255) for _ in range(length)])
+
+def derive_tags_from_token(token_bytes):
+    """Derive base-tag and enc-tag deterministically from the security token.
+
+    Maps bytes 0-3 to base-tag and bytes 4-7 to enc-tag by reducing each byte
+    modulo 26 and mapping to A-Z. In the astronomically unlikely case that both
+    tags are identical, bytes 8-11 are used for enc-tag instead.
+    """
+    def _to_tag(b4):
+        return ''.join(chr(ord('A') + (b % 26)) for b in b4)
+
+    base_tag = _to_tag(token_bytes[0:4])
+    enc_tag  = _to_tag(token_bytes[4:8])
+    if enc_tag == base_tag:
+        enc_tag = _to_tag(token_bytes[8:12])
+    return base_tag, enc_tag
 
 def generate_magic_header(tag: str) -> str:
     if len(tag) != 4:
@@ -712,21 +714,18 @@ args = build_arg_parser().parse_args()
 ni   = args.non_interactive  # shorthand used throughout
 
 # ── Generate mode: produce shared security parameters for CI setup jobs ────────
-# Does not require a Godot source tree. Generates base-tag, enc-tag,
-# security-token, and kdf-formula then writes them to GITHUB_OUTPUT (when
-# running inside GitHub Actions) or prints them as key=value pairs on stdout.
+# Does not require a Godot source tree. Generates a security-token and
+# kdf-formula then writes them to GITHUB_OUTPUT (when running inside GitHub
+# Actions) or prints them as key=value pairs on stdout. base-tag and enc-tag
+# are derived deterministically from the token by the apply step.
 # Typical usage:
 #   python godot_secure.py --mode generate --advanced-kdf --non-interactive
 if args.mode == "generate":
     init_log("Generate")
 
-    base_tag       = generate_random_tag()
-    enc_tag        = generate_random_tag()
-    while enc_tag == base_tag:
-        enc_tag    = generate_random_tag()
-
     security_token = generate_random_token()
     token_hex      = binascii.hexlify(security_token).decode('utf-8')
+    base_tag, enc_tag = derive_tags_from_token(security_token)
 
     if args.advanced_kdf:
         kdf = build_random_key_derivation()
@@ -735,32 +734,27 @@ if args.mode == "generate":
         kdf = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
         save_log("KDF formula: default XOR (pass --advanced-kdf for a randomised formula)")
 
-    save_log(f"base-tag:       {base_tag}")
-    save_log(f"enc-tag:        {enc_tag}")
     save_log(f"security-token: {token_hex}")
+    save_log(f"base-tag (derived): {base_tag}")
+    save_log(f"enc-tag  (derived): {enc_tag}")
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
-        log_print(MsgType.INFO, f"base-tag:       {base_tag}")
-        log_print(MsgType.INFO, f"enc-tag:        {enc_tag}")
         log_print(MsgType.INFO,  "security-token: ***")
         log_print(MsgType.INFO, f"kdf-formula:    {kdf}")
         with open(github_output, "a", encoding="utf-8") as fh:
-            fh.write(f"base-tag={base_tag}\n")
-            fh.write(f"enc-tag={enc_tag}\n")
             fh.write(f"security-token={token_hex}\n")
             # Heredoc form handles any future '=' in the formula safely.
             fh.write(f"kdf-formula<<GSEOF\n{kdf}\nGSEOF\n")
         log_print(MsgType.SUCCESS, "Security parameters written to GITHUB_OUTPUT.")
     else:
         # Local / non-CI use: print as key=value pairs on stdout.
-        print(f"base-tag={base_tag}")
-        print(f"enc-tag={enc_tag}")
         print(f"security-token={token_hex}")
         print(f"kdf-formula={kdf}")
         log_print(MsgType.INFO,
             "GITHUB_OUTPUT is not set — values printed to stdout. "
-            "Pass them to your build via --base-tag, --enc-tag, --token, and --kdf-formula.")
+            "Pass them to your build via --token and --kdf-formula. "
+            f"base-tag and enc-tag are derived from the token automatically.")
 
     pause_exit(ni)
     sys.exit(0)
@@ -900,40 +894,18 @@ if menu_choice == "1":
 
     encKey = resolve_encryption_key(godot_root, args)
 
-    # Random initial values
-    baseTag        = generate_random_tag()
-    encTag         = generate_random_tag()
+    # Resolve token first; derive magic header tags from it.
     security_token = generate_random_token()
     token_hex      = binascii.hexlify(security_token).decode('utf-8')
-    baseHeader     = generate_magic_header(baseTag)
-    encHeader      = generate_magic_header(encTag)
 
-    # Custom headers
-    if args.base_tag or args.enc_tag:
-        if args.base_tag:
-            baseTag    = args.base_tag.upper()
-            baseHeader = generate_magic_header(baseTag)
-            save_log(f"Pack header tag provided via --base-tag: {baseTag}")
-        if args.enc_tag:
-            encTag    = args.enc_tag.upper()
-            encHeader = generate_magic_header(encTag)
-            save_log(f"Encrypted header tag provided via --enc-tag: {encTag}")
-    else:
-        ans = prompt(
-            f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Headers {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
-            "n", ni
-        ).lower()
-        save_log(f"\n[INFO] - Use Custom Headers (y/n)?: {ans}")
-        if ans in ('y', 'yes'):
-            baseTag    = input("    Enter Custom Magic Header (e.g. GDPC): ").upper()
-            baseHeader = generate_magic_header(baseTag)
-            encTag     = input("    Enter Custom Encrypted Magic Header (e.g. GDEC): ").upper()
-            encHeader  = generate_magic_header(encTag)
-            save_log(f"    Enter Custom Magic Header: {baseTag}\n    Enter Custom Encrypted Magic Header: {encTag}")
-
-    # Token + key derivation
     token_hex, security_token, token_c_array, key_derivation_algorithm = \
         resolve_token_and_kdf(token_hex, security_token, args)
+
+    baseTag, encTag = derive_tags_from_token(security_token)
+    baseHeader      = generate_magic_header(baseTag)
+    encHeader       = generate_magic_header(encTag)
+    save_log(f"Pack header tag (derived from token): {baseTag}")
+    save_log(f"Encrypted header tag (derived from token): {encTag}")
 
     # Build MODIFICATIONS
     MODIFICATIONS = [
