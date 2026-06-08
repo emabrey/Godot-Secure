@@ -56,9 +56,7 @@ All interactive prompts have a corresponding CLI option. When every required opt
 | Option | Values | Description |
 |--------|--------|-------------|
 | `--algorithm` | `aes` · `camellia` · `aria` | Encryption algorithm. Default: `aes`. |
-| `--base-tag` | 4-char ASCII | Magic header tag for pack files. |
-| `--enc-tag` | 4-char ASCII | Magic header tag for encrypted files. |
-| `--advanced-kdf` | *(flag)* | Generate a randomized multi-layer key derivation formula. |
+| `--kdf-formula` | C statement | Expert override: supply an exact KDF formula from a pre-v1.3.0-alpha build. When omitted the formula is derived from the security token via HKDF automatically — no manual management required. |
 
 #### Encryption key options *(apply and refresh)*
 
@@ -87,28 +85,28 @@ All interactive prompts have a corresponding CLI option. When every required opt
 # Interactive run (default — presents the menu)
 python godot_secure.py /path/to/godot
 
-# Non-interactive apply with AES-256, auto-generated key, and advanced KDF
+# Non-interactive apply with AES-256 and an auto-generated key
 python godot_secure.py /path/to/godot \
     --mode apply --algorithm aes \
-    --generate-key --advanced-kdf \
+    --generate-key \
     --non-interactive
 
 # Non-interactive apply with Camellia-256
 python godot_secure.py /path/to/godot \
     --mode apply --algorithm camellia \
-    --generate-key --advanced-kdf \
+    --generate-key \
     --non-interactive
 
 # Non-interactive apply with ARIA-256
 python godot_secure.py /path/to/godot \
     --mode apply --algorithm aria \
-    --generate-key --advanced-kdf \
+    --generate-key \
     --non-interactive
 
 # Non-interactive apply with a key stored in an environment variable
 export SCRIPT_AES256_ENCRYPTION_KEY=<your-64-char-hex-key>
 python godot_secure.py /path/to/godot \
-    --mode apply --algorithm aes --advanced-kdf \
+    --mode apply --algorithm aes \
     --non-interactive
 
 # Refresh the security token (key read from SCRIPT_AES256_ENCRYPTION_KEY)
@@ -128,11 +126,12 @@ python godot_secure.py /path/to/godot --mode restore --non-interactive
     python godot_secure.py vendored/godot \
       --mode apply \
       --algorithm aes \
-      --advanced-kdf \
       --non-interactive
 ```
 
 Store `GODOT_ENCRYPTION_KEY` as an [encrypted Actions secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets). The log file written by the script contains the Security Token — upload it as a CI artifact or pipe it to a secrets store so the value is not lost.
+
+For multi-OS builds where the same token must be shared across all runners, use a `setup` job with `--mode generate` to produce the token once and pass it via `--token`. See [GodotSecureAction](https://github.com/emabrey/GodotSecureAction) for a complete multi-OS CI workflow.
 
 ---
 
@@ -168,12 +167,13 @@ Use this on a clean Godot source tree before compiling for the first time.
 **What happens:**
 
 1. You choose an encryption algorithm — `[1] AES-256` (default), `[2] Camellia-256`, or `[3] ARIA-256`.
-2. Optionally supply custom 4-character magic headers for pack files and encrypted files, or accept randomly generated ones.
-3. Optionally supply a custom 32-byte security token (hex string), or accept a randomly generated one.
-4. Optionally enable advanced key derivation, which generates a randomized multi-layer bitwise expression mixing the encryption key and the security token.
-5. The script patches the Godot source files, creating a `.backup` copy of every file it modifies before touching it.
-6. A `.godot_secure` state file is written to the Godot source root recording the algorithm, version, token, and timestamp.
-7. A timestamped log file is written next to the script. **Save this log** — it contains the security token and the generated header values you will need if you ever re-export your project.
+2. Optionally supply a custom 32-byte security token (hex string), or accept a randomly generated one.
+3. The security token is used to derive all other security parameters automatically:
+   - **Pack magic headers** — derived via `chr(ord('A') + (byte % 26))` applied to token bytes 0–3 and 4–7.
+   - **KDF formula** — derived via HKDF-SHA256 (RFC 5869), producing a unique multi-layer bitwise expression baked into the compiled binary.
+4. The script patches the Godot source files, creating a `.backup` copy of every file it modifies before touching it.
+5. A `.godot_secure` state file is written to the Godot source root recording the algorithm, version, token, and timestamp.
+6. A timestamped log file is written next to the script. **Save this log** — it contains the security token you will need if you ever re-export or rebuild your project.
 
 **After patching**, compile Godot from source as normal and export your project using your `SCRIPT_AES256_ENCRYPTION_KEY` environment variable.
 

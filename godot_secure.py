@@ -4,6 +4,8 @@ import json
 import random
 import string
 import binascii
+import hashlib
+import hmac
 import secrets
 import datetime
 import argparse
@@ -40,7 +42,7 @@ Examples
   # Fully non-interactive CI run with AES-256 and a pre-existing key
   python godot_secure.py /path/to/godot \\
       --mode apply --algorithm aes --generate-key \\
-      --advanced-kdf --non-interactive
+      --non-interactive
 
   # Refresh token, supplying the key via env var
   python godot_secure.py /path/to/godot --mode refresh --non-interactive
@@ -65,11 +67,12 @@ Examples
         default=None,
         help=(
             "Operation to perform. Replaces the interactive main menu. "
-            "'generate' outputs security-token and kdf-formula "
-            "for use in CI setup jobs without requiring a Godot source tree. "
-            "base-tag and enc-tag are derived from the token automatically. "
-            "When GITHUB_OUTPUT is set the values are written there directly; "
-            "otherwise they are printed as key=value pairs on stdout."
+            "'generate' outputs a security-token for use in CI setup jobs "
+            "without requiring a Godot source tree. "
+            "The KDF formula, base-tag, and enc-tag are all derived "
+            "deterministically from the token in the apply step. "
+            "When GITHUB_OUTPUT is set the token is written there directly; "
+            "otherwise it is printed as a key=value pair on stdout."
         ),
     )
 
@@ -82,21 +85,17 @@ Examples
         help="Encryption algorithm. Default: aes.",
     )
     apply_group.add_argument(
-        "--advanced-kdf",
-        action="store_true",
-        default=False,
-        help="Generate a randomized multi-layer key derivation formula.",
-    )
-    apply_group.add_argument(
         "--kdf-formula",
         metavar="FORMULA",
         default=None,
         help=(
-            "C statement for the per-byte key derivation inside the token XOR loop. "
-            "When provided, takes precedence over --advanced-kdf and the default XOR. "
-            "Must be identical across every OS build in a distribution or PCK files "
-            "will not decrypt correctly on platforms that used a different formula. "
-            "Generate once in a setup job and pass to all build jobs. "
+            "Expert override: verbatim C statement for the per-byte key derivation "
+            "inside the token XOR loop. "
+            "When omitted the formula is derived deterministically from the security "
+            "token via HKDF (RFC 5869) — no manual management required. "
+            "Only supply this when reproducing an exact formula from a previous build "
+            "that predates automatic HKDF derivation. "
+            "Must be identical across every OS build in a distribution. "
             "Example: 'token_key.write[i] = (uint8_t)(key_ptr[i] ^ Security::TOKEN[i]);'"
         ),
     )
@@ -160,6 +159,95 @@ def derive_tags_from_token(token_bytes):
     if enc_tag == base_tag:
         enc_tag = _to_tag(token_bytes[8:12])
     return base_tag, enc_tag
+
+def derive_kdf_from_token(token_bytes: bytes) -> str:
+    """Derive the KDF formula deterministically from the security token using HKDF.
+
+    Implements HKDF (RFC 5869) with a domain-separation label so this derivation
+    is cryptographically independent from the tag derivation (which uses raw token
+    bytes directly).  The produced formula is one-way: knowing the compiled C
+    expression does not help an attacker recover the 32-byte token (SHA-256
+    preimage resistance).  Two builds using the same token always produce
+    identical compiled KDF code, eliminating the need to pass kdf-formula as a
+    separate CI parameter.
+
+    HKDF-Extract:  PRK  = HMAC-SHA256(salt=b"godot-secure-kdf-formula-v1", IKM=token)
+    HKDF-Expand:   OKM  = T(1) || T(2) || ...
+                   T(i) = HMAC-SHA256(PRK, T(i-1) || info || counter)
+                   info = b"kdf-formula"
+    """
+    # ── HKDF-Extract ──────────────────────────────────────────────────────────
+    prk = hmac.new(
+        b"godot-secure-kdf-formula-v1",
+        token_bytes,
+        hashlib.sha256,
+    ).digest()
+
+    # ── HKDF-Expand ───────────────────────────────────────────────────────────
+    info    = b"kdf-formula"
+    output  = b""
+    block   = b""
+    counter = 1
+    while len(output) < 64:   # 64 bytes is more than enough to drive all choices
+        block   = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        output += block
+        counter += 1
+
+    # ── Consume bytes from the stream to make all structural choices ──────────
+    pos = 0
+
+    def _next() -> int:
+        nonlocal pos
+        b = output[pos % len(output)]
+        pos += 1
+        return b
+
+    def _choose(options: list):
+        return options[_next() % len(options)]
+
+    def _const() -> int:
+        return (_next() % 255) + 1
+
+    def _rotation() -> tuple:
+        shift = (_next() % 7) + 1
+        return shift, 8 - shift
+
+    operands = ["key_ptr[i]", "Security::TOKEN[i]"]
+    base_ops = [
+        "({a} ^ {b})",
+        "({a} + {b})",
+        "({a} | {b})",
+        "({a} & {b})",
+        "(({a} << {shift}) | ({a} >> {rshift}))",
+        "(({a} ^ {b}) + {const})",
+        "(({a} + {b}) ^ {const})",
+    ]
+    chain_ops = [
+        "({expr} ^ {value})",
+        "({expr} + {value})",
+        "({expr} | {value})",
+        "(({expr} << {shift}) | ({expr} >> {rshift}))",
+        "(({expr} ^ {value}) + {const})",
+        "(({expr} + {value}) ^ {const})",
+    ]
+
+    layers = (_next() % 5) + 2
+    a      = _choose(operands)
+    b      = operands[1] if a == operands[0] else operands[0]
+    shift, rshift = _rotation()
+    expression = _choose(base_ops).format(
+        a=a, b=b, shift=shift, rshift=rshift, const=_const()
+    )
+
+    for _ in range(layers - 1):
+        shift, rshift = _rotation()
+        value      = _choose(operands)
+        expression = _choose(chain_ops).format(
+            expr=expression, value=value, shift=shift, rshift=rshift, const=_const()
+        )
+
+    return f"token_key.write[i] = (uint8_t)({expression});"
+
 
 def generate_magic_header(tag: str) -> str:
     if len(tag) != 4:
@@ -657,7 +745,8 @@ def write_security_token_header(root_dir, token_hex, token_c_array):
 def resolve_token_and_kdf(default_token_hex, default_security_token, args):
     """Resolve security token and key derivation algorithm.
 
-    CLI options (--token, --advanced-kdf) take precedence over interactive prompts.
+    CLI option --token takes precedence over the interactive prompt.
+    --kdf-formula is an expert override; when absent the formula is derived from the token via HKDF.
     Returns (token_hex, security_token, token_c_array, key_derivation_algorithm).
     """
     ni        = args.non_interactive
@@ -684,23 +773,14 @@ def resolve_token_and_kdf(default_token_hex, default_security_token, args):
     token_c_array = ', '.join([f'0x{b:02X}' for b in sec_token])
 
     # Key derivation
-    # Priority: --kdf-formula > --advanced-kdf > interactive prompt > default XOR
+    # Priority: --kdf-formula (expert override) > HKDF derivation from token
     kdf_formula = getattr(args, 'kdf_formula', None)
     if kdf_formula:
         key_deriv = kdf_formula
-        save_log(f"KDF formula provided via --kdf-formula (cross-OS build):\n            {key_deriv}")
-    elif args.advanced_kdf:
-        key_deriv = build_random_key_derivation()
-        save_log(f"Advanced KDF enabled via --advanced-kdf flag:\n            {key_deriv}")
+        save_log(f"KDF formula provided via --kdf-formula (expert override):\n            {key_deriv}")
     else:
-        ans = prompt(
-            f"\n\n ℹ  {LogColors.OKBLUE}Use Advanced Key Derivation {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ",
-            "n", ni
-        ).lower()
-        save_log(f"\n[INFO] - Use Advanced Key Derivation (y/n)?: {ans}")
-        if ans in ('y', 'yes'):
-            key_deriv = build_random_key_derivation()
-            save_log(f"    Generated Advanced Key Derivation Algorithm:\n            {key_deriv}")
+        key_deriv = derive_kdf_from_token(sec_token)
+        save_log(f"KDF formula derived from security token via HKDF:\n            {key_deriv}")
 
     return token_hex, sec_token, token_c_array, key_deriv
 
@@ -714,47 +794,45 @@ args = build_arg_parser().parse_args()
 ni   = args.non_interactive  # shorthand used throughout
 
 # ── Generate mode: produce shared security parameters for CI setup jobs ────────
-# Does not require a Godot source tree. Generates a security-token and
-# kdf-formula then writes them to GITHUB_OUTPUT (when running inside GitHub
-# Actions) or prints them as key=value pairs on stdout. base-tag and enc-tag
-# are derived deterministically from the token by the apply step.
+# Does not require a Godot source tree. Generates a security-token and writes
+# it to GITHUB_OUTPUT (when running inside GitHub Actions) or prints it as a
+# key=value pair on stdout.
+#
+# The KDF formula, base-tag, and enc-tag are all derived deterministically
+# from the token by the apply step via HKDF and byte-mapping, so only a single
+# security-token value needs to be generated, stored, and shared.
+#
 # Typical usage:
-#   python godot_secure.py --mode generate --advanced-kdf --non-interactive
+#   python godot_secure.py --mode generate --non-interactive
 if args.mode == "generate":
     init_log("Generate")
 
-    security_token = generate_random_token()
-    token_hex      = binascii.hexlify(security_token).decode('utf-8')
+    security_token    = generate_random_token()
+    token_hex         = binascii.hexlify(security_token).decode('utf-8')
     base_tag, enc_tag = derive_tags_from_token(security_token)
-
-    if args.advanced_kdf:
-        kdf = build_random_key_derivation()
-        save_log(f"KDF formula (advanced): {kdf}")
-    else:
-        kdf = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
-        save_log("KDF formula: default XOR (pass --advanced-kdf for a randomised formula)")
+    kdf               = derive_kdf_from_token(security_token)
 
     save_log(f"security-token: {token_hex}")
-    save_log(f"base-tag (derived): {base_tag}")
-    save_log(f"enc-tag  (derived): {enc_tag}")
+    save_log(f"base-tag (derived from token): {base_tag}")
+    save_log(f"enc-tag  (derived from token): {enc_tag}")
+    save_log(f"kdf-formula (derived from token via HKDF): {kdf}")
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
-        log_print(MsgType.INFO,  "security-token: ***")
-        log_print(MsgType.INFO, f"kdf-formula:    {kdf}")
+        log_print(MsgType.INFO, "security-token: ***")
+        log_print(MsgType.INFO, f"base-tag (derived):        {base_tag}")
+        log_print(MsgType.INFO, f"enc-tag  (derived):        {enc_tag}")
+        log_print(MsgType.INFO, f"kdf-formula (derived):     {kdf}")
         with open(github_output, "a", encoding="utf-8") as fh:
             fh.write(f"security-token={token_hex}\n")
-            # Heredoc form handles any future '=' in the formula safely.
-            fh.write(f"kdf-formula<<GSEOF\n{kdf}\nGSEOF\n")
-        log_print(MsgType.SUCCESS, "Security parameters written to GITHUB_OUTPUT.")
+        log_print(MsgType.SUCCESS, "Security token written to GITHUB_OUTPUT.")
     else:
-        # Local / non-CI use: print as key=value pairs on stdout.
+        # Local / non-CI use: print as key=value pair on stdout.
         print(f"security-token={token_hex}")
-        print(f"kdf-formula={kdf}")
         log_print(MsgType.INFO,
-            "GITHUB_OUTPUT is not set — values printed to stdout. "
-            "Pass them to your build via --token and --kdf-formula. "
-            f"base-tag and enc-tag are derived from the token automatically.")
+            "GITHUB_OUTPUT is not set — security-token printed to stdout. "
+            "Pass it to your build via --token. "
+            "The KDF formula, base-tag, and enc-tag are derived from the token automatically.")
 
     pause_exit(ni)
     sys.exit(0)
