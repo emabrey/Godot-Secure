@@ -41,6 +41,44 @@ The KDF derivation is **one-way** — knowing the compiled C expression does not
 
 ---
 
+## Security model and limitations
+
+Godot Secure is designed to defeat **automated and scripted extraction** of encrypted game assets. What it does not claim to do is prevent a determined attacker who has physical access to your compiled export template.
+
+### What it protects against
+
+| Threat | Protected? | Why |
+|--------|-----------|-----|
+| Automated tools (gdsdecomp, standard PCK readers) | ✅ Yes | Custom magic headers prevent file identification; a tool that does not recognise the format cannot begin extraction |
+| Casual hex-editor inspection | ✅ Yes | No recognisable Godot PCK structure is visible in the file |
+| Reuse of known Godot exploits or tooling | ✅ Yes | Per-build unique headers and KDF formula mean no shared tooling exists or can be written |
+| Intermediate static reverse engineering | ⚠️ Significantly harder | Raw key bytes in the binary are not sufficient on their own — an attacker also needs to reverse the per-build KDF formula to reconstruct how the key is actually applied |
+| Determined attacker with a debugger | ❌ No | See below |
+
+### The fundamental limitation of client-side encryption
+
+The export template **must** decrypt the PCK at runtime, which means the key — or sufficient material to derive it — exists in process memory at that moment. A debugger can always capture it there:
+
+1. Attach to the running export template process
+2. Set a breakpoint on the AES / Camellia / ARIA context initialisation inside mbedTLS
+3. At that point the derived key is available in plaintext
+
+No client-side protection scheme — DRM included — can fully close this attack, because the decryption logic and the key it uses must both execute on hardware the attacker controls. Godot Secure raises the cost and skill floor of extraction significantly; it does not make extraction impossible.
+
+### What this means in practice
+
+Godot Secure provides meaningful protection against the threats that games most commonly face:
+
+- Automated asset rippers that batch-process PCK files
+- Casual reverse engineering attempts using known Godot tooling
+- Competitors or copycats who want a quick, automated copy of your assets
+
+It does **not** provide protection against a professional reverse engineer who is willing to treat your binary as a dedicated research target and spend days on it.
+
+If that is your threat model, client-side encryption alone is not sufficient. Complementary measures — server-authoritative game logic, online-only asset streaming, legal copyright enforcement, or some combination — are the appropriate tools for that tier of threat.
+
+---
+
 ## Usage
 
 ```
