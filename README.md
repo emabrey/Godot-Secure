@@ -206,7 +206,7 @@ jobs:
     steps:
       - name: Download Godot Secure
         run: |
-          curl -fL "https://github.com/emabrey/Godot-Secure/releases/download/v1.3.0-alpha/godot_secure.py" \
+          curl -fL "https://github.com/emabrey/Godot-Secure/releases/download/v1.4.0/godot_secure.py" \
             -o godot_secure.py
 
       - name: Generate security token
