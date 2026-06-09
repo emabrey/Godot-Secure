@@ -5,3 +5,6 @@ godot_secure_*.log
 
 # Folders:
 .vscode/
+__pycache__/
+*.pyc
+*.pyo

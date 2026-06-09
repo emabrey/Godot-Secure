@@ -12,12 +12,13 @@
 
 Godot Secure patches the Godot Engine C++ source code to replace the default AES-256 encryption with a cryptographically unique build — one whose pack headers, encrypted-file headers, and key derivation are all randomized at patch time so that no two Godot Secure builds share the same encryption fingerprint.
 
-Two algorithms are supported:
+Three encryption algorithms are supported:
 
 | Algorithm | Files modified |
-|-----------|---------------|
+|-----------|----------------|
 | AES-256 | 6 source files |
 | Camellia-256 | 8 source files (adds `CamelliaContext` to the crypto core) |
+| ARIA-256 | 8 source files (adds `AriaContext` to the crypto core) |
 
 After patching you compile Godot from source exactly as you normally would.
 
@@ -54,10 +55,8 @@ All interactive prompts have a corresponding CLI option. When every required opt
 
 | Option | Values | Description |
 |--------|--------|-------------|
-| `--algorithm` | `aes` · `camellia` | Encryption algorithm. Default: `aes`. |
-| `--base-tag` | 4-char ASCII | Magic header tag for pack files. |
-| `--enc-tag` | 4-char ASCII | Magic header tag for encrypted files. |
-| `--advanced-kdf` | *(flag)* | Generate a randomized multi-layer key derivation formula. |
+| `--algorithm` | `aes` · `camellia` · `aria` | Encryption algorithm. Default: `aes`. |
+| `--kdf-formula` | C statement | Expert override: supply an exact KDF formula from a pre-v1.3.0-alpha build. When omitted the formula is derived from the security token via HKDF automatically — no manual management required. |
 
 #### Encryption key options *(apply and refresh)*
 
@@ -86,16 +85,28 @@ All interactive prompts have a corresponding CLI option. When every required opt
 # Interactive run (default — presents the menu)
 python godot_secure.py /path/to/godot
 
-# Fully non-interactive CI apply with AES-256, auto-generated key and advanced KDF
+# Non-interactive apply with AES-256 and an auto-generated key
 python godot_secure.py /path/to/godot \
     --mode apply --algorithm aes \
-    --generate-key --advanced-kdf \
+    --generate-key \
+    --non-interactive
+
+# Non-interactive apply with Camellia-256
+python godot_secure.py /path/to/godot \
+    --mode apply --algorithm camellia \
+    --generate-key \
+    --non-interactive
+
+# Non-interactive apply with ARIA-256
+python godot_secure.py /path/to/godot \
+    --mode apply --algorithm aria \
+    --generate-key \
     --non-interactive
 
 # Non-interactive apply with a key stored in an environment variable
 export SCRIPT_AES256_ENCRYPTION_KEY=<your-64-char-hex-key>
 python godot_secure.py /path/to/godot \
-    --mode apply --algorithm aes --advanced-kdf \
+    --mode apply --algorithm aes \
     --non-interactive
 
 # Refresh the security token (key read from SCRIPT_AES256_ENCRYPTION_KEY)
@@ -115,11 +126,12 @@ python godot_secure.py /path/to/godot --mode restore --non-interactive
     python godot_secure.py vendored/godot \
       --mode apply \
       --algorithm aes \
-      --advanced-kdf \
       --non-interactive
 ```
 
 Store `GODOT_ENCRYPTION_KEY` as an [encrypted Actions secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets). The log file written by the script contains the Security Token — upload it as a CI artifact or pipe it to a secrets store so the value is not lost.
+
+For multi-OS builds where the same token must be shared across all runners, use a `setup` job with `--mode generate` to produce the token once and pass it via `--token`. See [GodotSecureAction](https://github.com/emabrey/GodotSecureAction) for a complete multi-OS CI workflow.
 
 ---
 
@@ -144,7 +156,7 @@ Every run shows a status banner and then this menu:
   Enter choice [1/2/3]:
 ```
 
-Options [2] and [3] show a note when Godot Secure has not yet been applied. Option [1] shows a warning when it has already been applied, but still allows re-application.
+Options [2] and [3] show a note when Godot Secure has not yet been applied. Option [1] shows a warning when it has already been applied, but still allows re-application with the same algorithm.
 
 ---
 
@@ -154,17 +166,27 @@ Use this on a clean Godot source tree before compiling for the first time.
 
 **What happens:**
 
-1. You choose an encryption algorithm — `[1] AES-256` (default) or `[2] Camellia-256`.
-2. Optionally supply custom 4-character magic headers for pack files and encrypted files, or accept randomly generated ones.
-3. Optionally supply a custom 32-byte security token (hex string), or accept a randomly generated one.
-4. Optionally enable advanced key derivation, which generates a randomized multi-layer bitwise expression mixing the encryption key and the security token.
-5. The script patches the Godot source files, creating a `.backup` copy of every file it modifies before touching it.
-6. A `.godot_secure` state file is written to the Godot source root recording the algorithm, version, token, and timestamp.
-7. A timestamped log file (`Log-<timestamp>-Godot-Secure-AES.txt` or `…-Camellia.txt`) is written next to the script. **Save this log** — it contains the security token and the generated header values you will need if you ever re-export your project.
+1. You choose an encryption algorithm — `[1] AES-256` (default), `[2] Camellia-256`, or `[3] ARIA-256`.
+2. Optionally supply a custom 32-byte security token (hex string), or accept a randomly generated one.
+3. The security token is used to derive all other security parameters automatically:
+   - **Pack magic headers** — derived via `chr(ord('A') + (byte % 26))` applied to token bytes 0–3 and 4–7.
+   - **KDF formula** — derived via HKDF-SHA256 (RFC 5869), producing a unique multi-layer bitwise expression baked into the compiled binary.
+4. The script patches the Godot source files, creating a `.backup` copy of every file it modifies before touching it.
+5. A `.godot_secure` state file is written to the Godot source root recording the algorithm, version, token, and timestamp.
+6. A timestamped log file is written next to the script. **Save this log** — it contains the security token you will need if you ever re-export or rebuild your project.
 
 **After patching**, compile Godot from source as normal and export your project using your `SCRIPT_AES256_ENCRYPTION_KEY` environment variable.
 
 > **Important:** The Security Token and the Encryption Key are two different values. Use the **Encryption Key** (your `SCRIPT_AES256_ENCRYPTION_KEY` environment variable) during export, not the Security Token.
+
+### Switching algorithms
+
+The script records which algorithm was used in `.godot_secure`. If you run option [1] again and select a different algorithm, the script will refuse to proceed — patching a source tree that already has one cipher's context class injected with a second cipher's patches would leave `crypto_core.h` and `crypto_core.cpp` in a broken state.
+
+To switch algorithms, you must restore the original source first:
+
+1. Run option [3] to restore all original Godot source files.
+2. Run option [1] and choose the new algorithm.
 
 ---
 
@@ -182,6 +204,8 @@ Use this when you want to rotate the security token on a source tree that alread
 
 After refreshing you must **rebuild Godot from source** and **re-export your project** with the same Encryption Key for the new token to take effect. Projects exported with the previous build will no longer be loadable by the new engine binary.
 
+> **Note:** Refresh only rotates the token. It does not change the encryption algorithm. If you pass `--algorithm` during a refresh and it does not match the algorithm recorded in `.godot_secure`, the script will abort with an error. To switch algorithms, restore the source tree with option [3] and re-apply with option [1].
+
 ---
 
 ## Option 3 — Restore original Godot source
@@ -197,7 +221,7 @@ Use this to undo all Godot Secure patches and return the source tree to its unmo
 5. The `.godot_secure` state file is removed.
 6. A restore log file is written.
 
-If a `.backup` file is missing for any non-Camellia file, the script warns you but continues with the remaining files. Camellia-specific backup files that are absent are silently skipped (expected when AES-256 was used).
+If a `.backup` file is missing for any of the core files, the script warns you but continues with the remaining files. The `crypto_core.h` and `crypto_core.cpp` backup files are silently skipped when absent — they are only created for Camellia-256 and ARIA-256 builds.
 
 ---
 
@@ -351,7 +375,7 @@ The `.godot_secure` file written to the Godot source root is a small JSON file:
 }
 ```
 
-Its presence is what tells the script that Godot Secure has already been applied. Deleting it manually causes the next run to treat the source tree as clean and offer the full apply flow again.
+Its presence is what tells the script that Godot Secure has already been applied. The recorded algorithm is used to prevent accidental re-application with a mismatched cipher. Deleting the file manually causes the next run to treat the source tree as clean and offer the full apply flow again — only do this if you are certain the source files are also in their original state.
 
 ---
 
@@ -363,8 +387,10 @@ Every run writes a timestamped log file in the working directory from which you 
 |------|---------------|
 | Apply (AES-256) | `godot_secure_AES_<timestamp>.log` |
 | Apply (Camellia-256) | `godot_secure_Camellia_<timestamp>.log` |
+| Apply (ARIA-256) | `godot_secure_ARIA_<timestamp>.log` |
 | Refresh (AES-256) | `godot_secure_Refresh-AES_<timestamp>.log` |
 | Refresh (Camellia-256) | `godot_secure_Refresh-Camellia_<timestamp>.log` |
+| Refresh (ARIA-256) | `godot_secure_Refresh-ARIA_<timestamp>.log` |
 | Restore | `godot_secure_Restore_<timestamp>.log` |
 
 All log files share the `godot_secure_*.log` prefix, so a single line in `.gitignore` covers them all:
@@ -379,7 +405,7 @@ Keep the Apply log somewhere safe. It is the only record of the exact header mag
 
 ## Files modified by Godot Secure
 
-### AES-256 (all builds)
+### All algorithms
 
 | File | Change |
 |------|--------|
@@ -388,7 +414,7 @@ Keep the Apply log somewhere safe. It is the only record of the exact header mag
 | `core/crypto/security_token.h` | **Created** — contains the randomized 32-byte token |
 | `core/io/file_access_pack.h` | Replaces the default pack header magic |
 | `core/io/file_access_encrypted.h` | Replaces the default encrypted-file header magic |
-| `core/io/file_access_encrypted.cpp` | Injects the security token into the AES key derivation |
+| `core/io/file_access_encrypted.cpp` | Injects the security token into the key derivation |
 
 ### Camellia-256 (additional files)
 
@@ -396,6 +422,13 @@ Keep the Apply log somewhere safe. It is the only record of the exact header mag
 |------|--------|
 | `core/crypto/crypto_core.h` | Adds the `CamelliaContext` class declaration |
 | `core/crypto/crypto_core.cpp` | Adds the full `CamelliaContext` implementation via mbedTLS |
+
+### ARIA-256 (additional files)
+
+| File | Change |
+|------|--------|
+| `core/crypto/crypto_core.h` | Adds the `AriaContext` class declaration |
+| `core/crypto/crypto_core.cpp` | Adds the full `AriaContext` implementation via mbedTLS |
 
 ---
 
