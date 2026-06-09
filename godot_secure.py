@@ -252,52 +252,6 @@ def generate_magic_header(tag: str) -> str:
         raise ValueError("Tag must be exactly 4 characters.")
     return "0x" + ''.join(f"{ord(c):02X}" for c in reversed(tag))
 
-def build_random_key_derivation():
-    operands = ["key_ptr[i]", "Security::TOKEN[i]"]
-
-    base_ops = [
-        "({a} ^ {b})",
-        "({a} + {b})",
-        "({a} | {b})",
-        "({a} & {b})",
-        "(({a} << {shift}) | ({a} >> {rshift}))",
-        "(({a} ^ {b}) + {const})",
-        "(({a} + {b}) ^ {const})",
-    ]
-
-    chain_ops = [
-        "({expr} ^ {value})",
-        "({expr} + {value})",
-        "({expr} | {value})",
-        "(({expr} << {shift}) | ({expr} >> {rshift}))",
-        "(({expr} ^ {value}) + {const})",
-        "(({expr} + {value}) ^ {const})",
-    ]
-
-    def rotation():
-        shift = secrets.randbelow(7) + 1
-        return shift, 8 - shift
-
-    def rand_const():
-        return secrets.randbelow(255) + 1
-
-    layers = secrets.randbelow(5) + 2
-    a = secrets.choice(operands)
-    b = operands[1] if a == operands[0] else operands[0]
-    shift, rshift = rotation()
-    expression = secrets.choice(base_ops).format(a=a, b=b, shift=shift, rshift=rshift, const=rand_const())
-
-    for _ in range(layers - 1):
-        shift, rshift = rotation()
-        value = secrets.choice(operands)
-        if value == expression:
-            value = secrets.choice(operands)
-        expression = secrets.choice(chain_ops).format(
-            expr=expression, value=value, shift=shift, rshift=rshift, const=rand_const()
-        )
-
-    return f"token_key.write[i] = (uint8_t)({expression});"
-
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 class LogColors:
@@ -750,7 +704,6 @@ def resolve_token_and_kdf(default_token_hex, default_security_token, args):
     ni        = args.non_interactive
     token_hex = default_token_hex
     sec_token = default_security_token
-    key_deriv = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
 
     # Token
     if args.token:
