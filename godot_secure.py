@@ -1,8 +1,6 @@
 import os
 import sys
 import json
-import random
-import string
 import binascii
 import hashlib
 import hmac
@@ -142,7 +140,7 @@ Examples
 # ── Generation helpers ─────────────────────────────────────────────────────────
 
 def generate_random_token(length=32):
-    return bytes([random.randint(0, 255) for _ in range(length)])
+    return secrets.token_bytes(length)
 
 def derive_tags_from_token(token_bytes):
     """Derive base-tag and enc-tag deterministically from the security token.
