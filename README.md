@@ -2,18 +2,6 @@
   <img src="Logos/PNGs/Godot Secure.png" alt="Godot Secure" width="360" />
 </p>
 
-<p align="center">
-  <strong>Support the current maintainer</strong><br/>
-  <a href="https://ko-fi.com/V7V41FR21F" target="_blank">
-    <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
-  </a>
-  &nbsp;&nbsp;&nbsp;
-  <strong>Support the original creator</strong><br/>
-  <a href="https://ko-fi.com/KnifeXRage" target="_blank">
-    <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Support KnifeXRage on Ko-fi" />
-  </a>
-</p>
-
 # Godot Secure
 
 Godot Secure patches the Godot Engine C++ source code to replace the default AES-256 encryption with a cryptographically unique build — one whose pack headers, encrypted-file headers, and key derivation are all derived from a single security token at patch time, so that no two Godot Secure builds share the same encryption fingerprint.
@@ -525,6 +513,6 @@ If this project has been useful to you, please consider supporting Aditya direct
 
 Godot Secure is free and open-source. If you find it useful, consider supporting its continued development:
 
-<a href="https://ko-fi.com/V7V41FR21F" target="_blank">
+<a href="https://ko-fi.com/emabrey" target="_blank">
   <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
 </a>
