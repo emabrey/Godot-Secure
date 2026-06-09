@@ -3,14 +3,20 @@
 </p>
 
 <p align="center">
+  <strong>Support the current maintainer</strong><br/>
   <a href="https://ko-fi.com/V7V41FR21F" target="_blank">
     <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
+  </a>
+  &nbsp;&nbsp;&nbsp;
+  <strong>Support the original creator</strong><br/>
+  <a href="https://ko-fi.com/KnifeXRage" target="_blank">
+    <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Support KnifeXRage on Ko-fi" />
   </a>
 </p>
 
 # Godot Secure
 
-Godot Secure patches the Godot Engine C++ source code to replace the default AES-256 encryption with a cryptographically unique build — one whose pack headers, encrypted-file headers, and key derivation are all randomized at patch time so that no two Godot Secure builds share the same encryption fingerprint.
+Godot Secure patches the Godot Engine C++ source code to replace the default AES-256 encryption with a cryptographically unique build — one whose pack headers, encrypted-file headers, and key derivation are all derived from a single security token at patch time, so that no two Godot Secure builds share the same encryption fingerprint.
 
 Three encryption algorithms are supported:
 
@@ -33,6 +39,20 @@ After patching you compile Godot from source exactly as you normally would.
 
 ---
 
+## How it works
+
+Everything that makes a Godot Secure build unique is derived deterministically from a single **security token** — a 32-byte random value generated once per build. You never need to generate or store separate values for pack headers, encrypted-file headers, or key derivation; they are all computed from the token automatically:
+
+| Parameter | How it is derived |
+|-----------|-------------------|
+| Pack magic header | `chr(ord('A') + (byte % 26))` applied to token bytes 0–3 |
+| Encrypted-file magic header | same formula applied to token bytes 4–7 (bytes 8–11 on the rare collision) |
+| KDF formula | HKDF-SHA256 (RFC 5869) expansion of the token, producing a unique multi-layer bitwise expression baked into the compiled binary |
+
+The KDF derivation is **one-way** — knowing the compiled C expression does not help an attacker recover the 32-byte token (SHA-256 preimage resistance).
+
+---
+
 ## Usage
 
 ```
@@ -49,14 +69,17 @@ All interactive prompts have a corresponding CLI option. When every required opt
 
 | Option | Values | Description |
 |--------|--------|-------------|
-| `--mode` | `apply` · `refresh` · `restore` | Operation to perform. Replaces the interactive main menu. |
+| `--mode` | `apply` | Patch a clean Godot source tree. |
+| | `refresh` | Rotate the security token on an already-patched source tree. |
+| | `restore` | Revert all patches and remove generated files. |
+| | `generate` | Generate a new security token and write it to `GITHUB_OUTPUT` (or stdout). Does not require a Godot source tree. Use this in CI setup jobs to produce a shared token before the build matrix runs. |
 
 #### Apply options
 
 | Option | Values | Description |
 |--------|--------|-------------|
 | `--algorithm` | `aes` · `camellia` · `aria` | Encryption algorithm. Default: `aes`. |
-| `--kdf-formula` | C statement | Expert override: supply an exact KDF formula from a pre-v1.3.0-alpha build. When omitted the formula is derived from the security token via HKDF automatically — no manual management required. |
+| `--kdf-formula` | C statement | Expert override: supply an exact KDF formula from a pre-v1.3.0-alpha build that predates automatic HKDF derivation. When omitted the formula is derived from the security token automatically — no manual management required. |
 
 #### Encryption key options *(apply and refresh)*
 
@@ -71,7 +94,7 @@ All interactive prompts have a corresponding CLI option. When every required opt
 
 | Option | Values | Description |
 |--------|--------|-------------|
-| `--token` | 64-char hex | Security token to embed in the engine binary. A random token is generated when omitted. |
+| `--token` | 64-char hex | Security token to embed in the engine binary. A random token is generated when omitted. In multi-OS CI builds, generate the token once with `--mode generate` and pass the same value here for every runner. |
 
 #### Behaviour
 
@@ -109,6 +132,15 @@ python godot_secure.py /path/to/godot \
     --mode apply --algorithm aes \
     --non-interactive
 
+# Generate a security token for use in multi-OS CI builds
+python godot_secure.py --mode generate --non-interactive
+
+# Apply using a pre-generated token (all runners must use the same value)
+python godot_secure.py /path/to/godot \
+    --mode apply --algorithm aes \
+    --token <64-char-hex-token> \
+    --non-interactive
+
 # Refresh the security token (key read from SCRIPT_AES256_ENCRYPTION_KEY)
 python godot_secure.py /path/to/godot --mode refresh --non-interactive
 
@@ -117,6 +149,8 @@ python godot_secure.py /path/to/godot --mode restore --non-interactive
 ```
 
 ### GitHub Actions example
+
+#### Single-OS build
 
 ```yaml
 - name: Patch Godot source
@@ -129,9 +163,49 @@ python godot_secure.py /path/to/godot --mode restore --non-interactive
       --non-interactive
 ```
 
-Store `GODOT_ENCRYPTION_KEY` as an [encrypted Actions secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets). The log file written by the script contains the Security Token — upload it as a CI artifact or pipe it to a secrets store so the value is not lost.
+Store `GODOT_ENCRYPTION_KEY` as an [encrypted Actions secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets).
 
-For multi-OS builds where the same token must be shared across all runners, use a `setup` job with `--mode generate` to produce the token once and pass it via `--token`. See [GodotSecureAction](https://github.com/emabrey/GodotSecureAction) for a complete multi-OS CI workflow.
+#### Multi-OS build (shared security token)
+
+When building for multiple operating systems in a matrix, **all runners must use the same security token** or the compiled binaries will use mismatched encryption parameters and exported projects will fail to open on the wrong platform.
+
+Use a `setup` job to generate the token once, then pass it to every build job:
+
+```yaml
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      security-token: ${{ steps.gen.outputs.security-token }}
+    steps:
+      - name: Download Godot Secure
+        run: |
+          curl -fL "https://github.com/emabrey/Godot-Secure/releases/download/v1.3.0-alpha/godot_secure.py" \
+            -o godot_secure.py
+
+      - name: Generate security token
+        id: gen
+        run: python3 godot_secure.py --mode generate --non-interactive
+
+  build:
+    needs: [setup]
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Patch Godot source
+        env:
+          SCRIPT_AES256_ENCRYPTION_KEY: ${{ secrets.GODOT_ENCRYPTION_KEY }}
+        run: |
+          python godot_secure.py vendored/godot \
+            --mode apply \
+            --algorithm aes \
+            --token "${{ needs.setup.outputs.security-token }}" \
+            --non-interactive
+```
+
+For a complete, production-ready multi-OS CI workflow including SCons caching, integration tests, and release packaging, see [GodotSecureAction](https://github.com/emabrey/GodotSecureAction).
 
 ---
 
@@ -169,8 +243,8 @@ Use this on a clean Godot source tree before compiling for the first time.
 1. You choose an encryption algorithm — `[1] AES-256` (default), `[2] Camellia-256`, or `[3] ARIA-256`.
 2. Optionally supply a custom 32-byte security token (hex string), or accept a randomly generated one.
 3. The security token is used to derive all other security parameters automatically:
-   - **Pack magic headers** — derived via `chr(ord('A') + (byte % 26))` applied to token bytes 0–3 and 4–7.
-   - **KDF formula** — derived via HKDF-SHA256 (RFC 5869), producing a unique multi-layer bitwise expression baked into the compiled binary.
+   - **Pack magic headers** — derived via `chr(ord('A') + (byte % 26))` applied to token bytes 0–3 and 4–7, giving every build a unique 4-byte file signature.
+   - **KDF formula** — derived via HKDF-SHA256 (RFC 5869), producing a unique multi-layer bitwise expression baked into the compiled binary that transforms your encryption key before use.
 4. The script patches the Godot source files, creating a `.backup` copy of every file it modifies before touching it.
 5. A `.godot_secure` state file is written to the Godot source root recording the algorithm, version, token, and timestamp.
 6. A timestamped log file is written next to the script. **Save this log** — it contains the security token you will need if you ever re-export or rebuild your project.
@@ -388,6 +462,7 @@ Every run writes a timestamped log file in the working directory from which you 
 | Apply (AES-256) | `godot_secure_AES_<timestamp>.log` |
 | Apply (Camellia-256) | `godot_secure_Camellia_<timestamp>.log` |
 | Apply (ARIA-256) | `godot_secure_ARIA_<timestamp>.log` |
+| Generate | `godot_secure_Generate_<timestamp>.log` |
 | Refresh (AES-256) | `godot_secure_Refresh-AES_<timestamp>.log` |
 | Refresh (Camellia-256) | `godot_secure_Refresh-Camellia_<timestamp>.log` |
 | Refresh (ARIA-256) | `godot_secure_Refresh-ARIA_<timestamp>.log` |
@@ -432,9 +507,23 @@ Keep the Apply log somewhere safe. It is the only record of the exact header mag
 
 ---
 
+## Credits
+
+Godot Secure was originally created by [Aditya Raj (KnifeXRage)](https://github.com/KnifeXRage). The original project introduced the foundational concept of patching Godot Engine source at build time to replace its default pack encryption with a randomized, per-build scheme — the idea that makes this whole tool meaningful. Without that starting point, none of the work here would exist.
+
+The current version has grown considerably from that foundation: Camellia-256 and ARIA-256 cipher support, HKDF-based security token derivation that eliminates the need to manage separate KDF and header parameters, a `--mode generate` CI workflow for multi-OS matrix builds, algorithm mismatch guards, a full unit test suite, rewritten error messages and documentation, and [GodotSecureAction](https://github.com/emabrey/GodotSecureAction) for drop-in GitHub Actions integration. But all of that is built on top of what Aditya started.
+
+If this project has been useful to you, please consider supporting Aditya directly — he is a student developer who built the original entirely on his own:
+
+<a href="https://ko-fi.com/KnifeXRage" target="_blank">
+  <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Support KnifeXRage on Ko-fi" />
+</a>
+
+---
+
 ## Support
 
-Godot Secure is free and open-source. If you find it useful, consider supporting its development:
+Godot Secure is free and open-source. If you find it useful, consider supporting its continued development:
 
 <a href="https://ko-fi.com/V7V41FR21F" target="_blank">
   <img height="36" src="https://storage.ko-fi.com/cdn/kofi5.png?v=6" border="0" alt="Buy Me a Coffee at ko-fi.com" />
